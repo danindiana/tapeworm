@@ -59,7 +59,13 @@ fn migrate(conn: &Connection) -> Result<()> {
              connector    TEXT    NOT NULL DEFAULT ''
          );
          CREATE INDEX IF NOT EXISTS idx_ps_command_id ON pipeline_steps(command_id);
-         CREATE INDEX IF NOT EXISTS idx_ps_tool       ON pipeline_steps(tool);",
+         CREATE INDEX IF NOT EXISTS idx_ps_tool       ON pipeline_steps(tool);
+
+         CREATE TABLE IF NOT EXISTS command_embeddings (
+             command_id  INTEGER PRIMARY KEY REFERENCES commands(id) ON DELETE CASCADE,
+             model       TEXT    NOT NULL,
+             embedding   BLOB    NOT NULL   -- packed little-endian f32 array
+         );",
     )?;
     Ok(())
 }
@@ -247,6 +253,90 @@ pub fn top_pipelines(conn: &Connection, limit: usize) -> Result<Vec<(String, i64
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+// --- Embedding functions ---
+
+pub fn insert_embedding(
+    conn: &Connection,
+    command_id: i64,
+    model: &str,
+    embedding: &[f32],
+) -> Result<()> {
+    let blob = crate::embed::vec_to_blob(embedding);
+    conn.execute(
+        "INSERT OR REPLACE INTO command_embeddings (command_id, model, embedding)
+         VALUES (?1, ?2, ?3)",
+        params![command_id, model, blob],
+    )?;
+    Ok(())
+}
+
+/// Returns (command_id, command_text, cwd) for commands without embeddings.
+pub fn get_unembedded(conn: &Connection, limit: usize) -> Result<Vec<(i64, String, String)>> {
+    let lim = if limit == 0 { i64::MAX } else { limit as i64 };
+    let mut stmt = conn.prepare(
+        "SELECT id, command, cwd FROM commands
+         WHERE id NOT IN (SELECT command_id FROM command_embeddings)
+         ORDER BY id ASC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![lim], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Returns count of commands without embeddings.
+pub fn unembedded_count(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM commands WHERE id NOT IN (SELECT command_id FROM command_embeddings)",
+        params![],
+        |r| r.get(0),
+    )?)
+}
+
+/// Load all embeddings for semantic search.
+pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<crate::semantic::EmbeddingEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT command_id, embedding FROM command_embeddings ORDER BY command_id ASC",
+    )?;
+    let rows = stmt.query_map(params![], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    let entries = rows
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|(id, blob)| crate::semantic::EmbeddingEntry {
+            command_id: id,
+            embedding: crate::embed::blob_to_vec(&blob),
+        })
+        .collect();
+    Ok(entries)
+}
+
+/// Fetch specific command records by their IDs (for displaying search results).
+pub fn get_commands_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<CommandRecord>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    // Build a VALUES list for the IN clause — safe since ids are i64
+    let placeholders: String = ids.iter().enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
+                exit_code, duration_ms, shell, user, hostname, session_id
+         FROM commands WHERE id IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    // Build params dynamically
+    let params_vec: Vec<&dyn rusqlite::ToSql> = ids.iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
+    rows_to_records(&mut stmt, params_vec.as_slice())
 }
 
 fn rows_to_records(

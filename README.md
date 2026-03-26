@@ -154,6 +154,67 @@ Uses a `DEBUG` trap to capture `$BASH_COMMAND` before execution, and `PROMPT_COM
 
 ---
 
+## Semantic search (Ollama embeddings)
+
+tapeworm can embed every recorded command using a local Ollama model and enable natural language retrieval over your shell history.
+
+### Setup
+
+Pull an embedding model (one-time):
+```bash
+ollama pull nomic-embed-text
+```
+
+Embed all recorded commands:
+```bash
+tapeworm embed
+# Embedding 1247 commands with nomic-embed-text …
+#   Done. 1247 embedded, 0 errors.
+```
+
+Subsequent runs only embed new commands (idempotent — already-embedded commands are skipped).
+
+### Semantic search
+
+```bash
+# Natural language queries work across command text + working directory
+tapeworm semantic "debug memory leak"
+tapeworm semantic "rust compilation failed"
+tapeworm semantic "how much disk space am I using"
+tapeworm semantic "GPU memory status" -l 5
+```
+
+Results are ranked by cosine similarity with color-coded scores:
+- **Green (≥80%)** — high confidence match
+- **Yellow (60–79%)** — likely relevant
+- **Grey (<60%)** — weak match
+
+### How it works
+
+Each command is embedded as:
+```
+"shell command: {cmd} | directory: {cwd}"
+```
+
+Including CWD makes the embedding context-aware — `cargo build` in `~/tapeworm` and `~/other-project` produce slightly different vectors, enabling project-scoped retrieval.
+
+Embeddings are stored as packed little-endian `f32` BLOBs in the `command_embeddings` table. At query time, all embeddings are loaded into memory and ranked by cosine similarity against the query embedding. This is fast enough for typical shell history sizes (tens of thousands of commands).
+
+### Options
+
+```bash
+tapeworm embed [--model MODEL] [--url URL] [-l LIMIT]
+tapeworm semantic QUERY [-l LIMIT] [--model MODEL] [--url URL]
+```
+
+Default model: `nomic-embed-text`. Default URL: `http://localhost:11434`.
+
+### Upgrade path
+
+For very large histories (100k+ commands), replace the in-memory cosine search with [`sqlite-vec`](https://github.com/asg017/sqlite-vec) — a SQLite extension with SIMD-accelerated ANN search. The `command_embeddings` BLOB schema is forward-compatible.
+
+---
+
 ## Pipeline composition analysis
 
 Every recorded command is parsed into pipeline steps at record time and stored in `pipeline_steps`. This makes the history corpus a structured execution trace, not just a string log.

@@ -1,10 +1,12 @@
 mod db;
 mod display;
+mod embed;
 mod parse;
 mod record;
+mod semantic;
 mod shell;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use record::CommandRecord;
 use std::env;
@@ -79,6 +81,34 @@ enum Commands {
     Pipes {
         #[arg(short, long, default_value_t = 20)]
         limit: usize,
+    },
+
+    /// Generate Ollama embeddings for unprocessed commands
+    Embed {
+        /// Ollama embedding model
+        #[arg(long, default_value = embed::DEFAULT_MODEL)]
+        model: String,
+        /// Ollama base URL
+        #[arg(long, default_value = embed::DEFAULT_URL)]
+        url: String,
+        /// Max commands to embed in this run (0 = all pending)
+        #[arg(short, long, default_value_t = 0)]
+        limit: usize,
+    },
+
+    /// Semantic similarity search using stored embeddings
+    Semantic {
+        /// Natural language query
+        query: String,
+        /// Number of results to return
+        #[arg(short, long, default_value_t = 10)]
+        limit: usize,
+        /// Ollama base URL
+        #[arg(long, default_value = embed::DEFAULT_URL)]
+        url: String,
+        /// Embedding model (must match what was used during embed)
+        #[arg(long, default_value = embed::DEFAULT_MODEL)]
+        model: String,
     },
 
     /// Print path to the SQLite database file
@@ -167,6 +197,59 @@ fn main() -> Result<()> {
             let patterns = db::top_pipelines(&conn, limit)?;
             let bigrams = db::top_bigrams(&conn, limit)?;
             display::print_pipes(&patterns, &bigrams);
+        }
+
+        Commands::Embed { model, url, limit } => {
+            let client = embed::OllamaClient::new(&url, &model);
+            client.check_model().context("checking embedding model")?;
+
+            let conn = db::open()?;
+            let pending = db::get_unembedded(&conn, limit)?;
+            let total = pending.len();
+            if total == 0 {
+                println!("All commands already embedded.");
+            } else {
+                println!("Embedding {} commands with {} …", total, model);
+                let mut done = 0usize;
+                let mut errors = 0usize;
+                for (command_id, command, cwd) in &pending {
+                    let text = embed::embed_text(command, cwd);
+                    match client.embed(&text) {
+                        Ok(vec) => {
+                            db::insert_embedding(&conn, *command_id, &model, &vec)?;
+                            done += 1;
+                            // In-place progress line
+                            eprint!("\r  {}/{} embedded", done, total);
+                        }
+                        Err(e) => {
+                            errors += 1;
+                            eprintln!("\r  [{}/{}] error embedding cmd {}: {}", done, total, command_id, e);
+                        }
+                    }
+                }
+                eprintln!("\r  Done. {} embedded, {} errors.              ", done, errors);
+            }
+        }
+
+        Commands::Semantic { query, limit, url, model } => {
+            let client = embed::OllamaClient::new(&url, &model);
+            let query_vec = client.embed(&query)
+                .context("embedding query — is Ollama running and model available?")?;
+
+            let conn = db::open()?;
+            let corpus = db::get_all_embeddings(&conn)?;
+            if corpus.is_empty() {
+                anyhow::bail!("No embeddings stored yet. Run `tapeworm embed` first.");
+            }
+
+            let matches = semantic::top_k_similar(&query_vec, &corpus, limit);
+            let ids: Vec<i64> = matches.iter().map(|(id, _)| *id).collect();
+            let mut records = db::get_commands_by_ids(&conn, &ids)?;
+
+            // Re-order records to match similarity ranking
+            records.sort_by_key(|r| ids.iter().position(|id| Some(*id) == r.id).unwrap_or(usize::MAX));
+
+            display::print_semantic_results(&records, &matches);
         }
 
         Commands::DbPath => {

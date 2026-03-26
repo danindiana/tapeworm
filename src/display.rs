@@ -111,6 +111,72 @@ pub fn print_stats(
     }
 }
 
+pub fn print_semantic_results(records: &[CommandRecord], scores: &[(i64, f32)]) {
+    if records.is_empty() {
+        println!("{}", "No matching commands found.".yellow());
+        return;
+    }
+
+    let home = dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let mut table = Table::new();
+    table.set_header(vec![
+        Cell::new("Sim").add_attribute(Attribute::Bold),
+        Cell::new("Time").add_attribute(Attribute::Bold),
+        Cell::new("Exit").add_attribute(Attribute::Bold),
+        Cell::new("Dir").add_attribute(Attribute::Bold),
+        Cell::new("Command").add_attribute(Attribute::Bold),
+    ]);
+
+    for r in records {
+        let score = r.id
+            .and_then(|id| scores.iter().find(|(sid, _)| *sid == id))
+            .map(|(_, s)| *s)
+            .unwrap_or(0.0);
+
+        let sim_pct = (score * 100.0) as u32;
+        let sim_cell = if sim_pct >= 80 {
+            Cell::new(format!("{sim_pct}%")).fg(Color::Green)
+        } else if sim_pct >= 60 {
+            Cell::new(format!("{sim_pct}%")).fg(Color::Yellow)
+        } else {
+            Cell::new(format!("{sim_pct}%")).fg(Color::DarkGrey)
+        };
+
+        let exit_cell = if r.exit_code == 0 {
+            Cell::new("0").fg(Color::Green)
+        } else {
+            Cell::new(r.exit_code.to_string()).fg(Color::Red)
+        };
+
+        let cmd_display = if r.command.len() > 80 {
+            format!("{}…", &r.command[..79])
+        } else {
+            r.command.clone()
+        };
+
+        let cwd_display = if !home.is_empty() && r.cwd.starts_with(&home) {
+            format!("~{}", &r.cwd[home.len()..])
+        } else {
+            r.cwd.clone()
+        };
+
+        let ts = if r.timestamp_iso.len() >= 19 { &r.timestamp_iso[..19] } else { &r.timestamp_iso };
+
+        table.add_row(vec![
+            sim_cell,
+            Cell::new(ts),
+            exit_cell,
+            Cell::new(cwd_display),
+            Cell::new(cmd_display),
+        ]);
+    }
+
+    println!("{table}");
+}
+
 pub fn print_tools(top_tools: &[(String, i64)]) {
     if top_tools.is_empty() {
         println!("{}", "No pipeline step data yet. Run some commands first.".yellow());
