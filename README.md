@@ -17,6 +17,7 @@ Unlike `~/.zsh_history` or `~/.bash_history`, tapeworm gives you a queryable, ex
 - JSON and CSV export
 - Non-blocking: recording fires as a disowned background subprocess (`&!`) — zero perceptible prompt latency
 - Composes cleanly with oh-my-zsh, powerlevel10k, and other zsh frameworks via `add-zsh-hook`
+- **Pipeline composition analysis**: parses every recorded command into steps, extracts tool names, and stores them in a `pipeline_steps` table for frequency and bigram analysis
 
 ---
 
@@ -64,6 +65,8 @@ tapeworm <COMMAND>
 | `search PATTERN [-l LIMIT]` | Substring search across command history |
 | `export [--format json\|csv]` | Dump all records to stdout |
 | `stats` | Top commands + hourly activity chart |
+| `tools [-l LIMIT]` | Top tools ranked by frequency across all pipeline steps |
+| `pipes [-l LIMIT]` | Top pipeline patterns and most common pipe bigrams |
 | `db-path` | Print path to the SQLite database file |
 
 ### Examples
@@ -75,11 +78,14 @@ tapeworm log -l 100
 # Find all git commands
 tapeworm search git
 
+# What tools do I use most?
+tapeworm tools
+
+# What pipelines do I compose most often?
+tapeworm pipes
+
 # Export everything to JSON
 tapeworm export --format json > history.json
-
-# Export to CSV
-tapeworm export --format csv > history.csv
 
 # Usage statistics
 tapeworm stats
@@ -110,6 +116,17 @@ CREATE TABLE commands (
     hostname       TEXT    NOT NULL DEFAULT '',
     session_id     TEXT    NOT NULL DEFAULT ''  -- UUID v4 per shell process
 );
+
+-- One row per pipeline step within a recorded command.
+-- Enables tool frequency, bigram, and composition pattern analysis.
+CREATE TABLE pipeline_steps (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    command_id   INTEGER NOT NULL REFERENCES commands(id) ON DELETE CASCADE,
+    step_index   INTEGER NOT NULL,   -- 0-based position in pipeline
+    tool         TEXT    NOT NULL,   -- extracted tool name (argv[0], basename, wrappers stripped)
+    raw          TEXT    NOT NULL,   -- full text of this pipeline step
+    connector    TEXT    NOT NULL DEFAULT ''  -- |, &&, ||, ; or "" for last step
+);
 ```
 
 You can query it directly with `sqlite3`:
@@ -134,6 +151,76 @@ add-zsh-hook precmd  _tapeworm_precmd
 ### bash
 
 Uses a `DEBUG` trap to capture `$BASH_COMMAND` before execution, and `PROMPT_COMMAND` to record after. A `_tw_in_prompt` guard prevents recursion.
+
+---
+
+## Pipeline composition analysis
+
+Every recorded command is parsed into pipeline steps at record time and stored in `pipeline_steps`. This makes the history corpus a structured execution trace, not just a string log.
+
+### Parser
+
+The parser (`src/parse.rs`) uses a state machine that splits on `|`, `&&`, `||`, `;` at the top level only. It correctly handles:
+
+- Single and double quotes (operators inside quotes are literal)
+- Backslash escapes
+- `$(...)` subshell expansions (operators inside are not splits)
+- Bare `(...)` subshell groupings, e.g. `(cd /tmp && ls) | grep foo`
+
+For each step, the tool name is extracted by stripping:
+- Leading env-var assignments (`FOO=bar cmd` → `cmd`)
+- Wrapper commands: `sudo`, `env`, `time`, `nice`, `nohup`, `watch`
+- Flags belonging to wrappers, including their arguments (`sudo -u root cmd` → `cmd`)
+- Path prefixes (`/usr/bin/grep` → `grep`, `./target/release/tapeworm` → `tapeworm`)
+
+### What you can learn
+
+**`tapeworm tools`** — which tools you reach for most, across all pipeline steps (not just first-position commands):
+
+```
+grep   ████████████████████████████ 312
+sort   ████████████████             189
+awk    ████████                      94
+```
+
+**`tapeworm pipes`** — which full pipeline patterns recur, and which tool-pairs you compose most:
+
+```
+Top patterns:
+  grep | sort | uniq | head    (47x)
+  ps | grep | awk              (23x)
+
+Top bigrams (A | B):
+  grep  →  sort    (61x)
+  sort  →  uniq    (47x)
+  ps    →  grep    (31x)
+```
+
+### Direct SQL queries
+
+```bash
+sqlite3 ~/.local/share/tapeworm/history.db
+
+-- Commands where step 0 is git but the pipeline failed
+SELECT c.command, c.exit_code
+FROM commands c
+JOIN pipeline_steps p ON p.command_id = c.id AND p.step_index = 0
+WHERE p.tool = 'git' AND c.exit_code != 0;
+
+-- Most common 3-tool pipelines
+SELECT GROUP_CONCAT(tool, ' | '), COUNT(*) as cnt
+FROM (SELECT command_id, tool FROM pipeline_steps ORDER BY command_id, step_index)
+GROUP BY command_id
+HAVING COUNT(*) = 3
+ORDER BY cnt DESC LIMIT 20;
+
+-- Tools you use after grep (bigrams where grep is the source)
+SELECT b.tool, COUNT(*) as cnt
+FROM pipeline_steps a JOIN pipeline_steps b
+  ON b.command_id = a.command_id AND b.step_index = a.step_index + 1
+WHERE a.tool = 'grep' AND a.connector = '|'
+GROUP BY b.tool ORDER BY cnt DESC;
+```
 
 ---
 

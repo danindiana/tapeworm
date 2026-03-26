@@ -48,7 +48,18 @@ fn migrate(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_commands_cmd
              ON commands(command);
          CREATE INDEX IF NOT EXISTS idx_commands_session
-             ON commands(session_id);",
+             ON commands(session_id);
+
+         CREATE TABLE IF NOT EXISTS pipeline_steps (
+             id           INTEGER PRIMARY KEY AUTOINCREMENT,
+             command_id   INTEGER NOT NULL REFERENCES commands(id) ON DELETE CASCADE,
+             step_index   INTEGER NOT NULL,
+             tool         TEXT    NOT NULL,
+             raw          TEXT    NOT NULL,
+             connector    TEXT    NOT NULL DEFAULT ''
+         );
+         CREATE INDEX IF NOT EXISTS idx_ps_command_id ON pipeline_steps(command_id);
+         CREATE INDEX IF NOT EXISTS idx_ps_tool       ON pipeline_steps(tool);",
     )?;
     Ok(())
 }
@@ -147,6 +158,95 @@ pub fn avg_duration(conn: &Connection) -> Result<f64> {
         params![],
         |r| r.get::<_, Option<f64>>(0).map(|v| v.unwrap_or(0.0)),
     )?)
+}
+
+pub fn insert_pipeline_steps(
+    conn: &Connection,
+    command_id: i64,
+    steps: &[crate::parse::PipelineStep],
+) -> Result<()> {
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO pipeline_steps (command_id, step_index, tool, raw, connector)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for step in steps {
+        stmt.execute(params![
+            command_id,
+            step.index as i64,
+            step.tool,
+            step.raw,
+            step.connector,
+        ])?;
+    }
+    Ok(())
+}
+
+pub fn top_tools(conn: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT tool, COUNT(*) as cnt
+         FROM pipeline_steps
+         WHERE tool != ''
+         GROUP BY tool
+         ORDER BY cnt DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Top consecutive tool pairs connected by a bare `|`.
+pub fn top_bigrams(conn: &Connection, limit: usize) -> Result<Vec<(String, String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.tool, b.tool, COUNT(*) as cnt
+         FROM pipeline_steps a
+         JOIN pipeline_steps b
+           ON b.command_id = a.command_id
+          AND b.step_index = a.step_index + 1
+         WHERE a.connector = '|'
+           AND a.tool != ''
+           AND b.tool != ''
+         GROUP BY a.tool, b.tool
+         ORDER BY cnt DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Top full pipeline patterns as `tool1 | tool2 | tool3` strings.
+/// Only multi-step pipelines are included. Uses ordered subquery for deterministic
+/// GROUP_CONCAT results.
+pub fn top_pipelines(conn: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT pattern, COUNT(*) as cnt
+         FROM (
+             SELECT command_id,
+                    GROUP_CONCAT(tool, ' | ') as pattern
+             FROM (
+                 SELECT command_id, tool
+                 FROM pipeline_steps
+                 WHERE tool != ''
+                 ORDER BY command_id, step_index
+             )
+             GROUP BY command_id
+             HAVING COUNT(*) > 1
+         )
+         GROUP BY pattern
+         ORDER BY cnt DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 fn rows_to_records(

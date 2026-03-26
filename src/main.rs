@@ -1,5 +1,6 @@
 mod db;
 mod display;
+mod parse;
 mod record;
 mod shell;
 
@@ -68,6 +69,18 @@ enum Commands {
     /// Show usage statistics and activity charts
     Stats,
 
+    /// Show top tools ranked by frequency across all pipeline steps
+    Tools {
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+
+    /// Show top pipeline patterns and most common pipe bigrams (A | B)
+    Pipes {
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+
     /// Print path to the SQLite database file
     DbPath,
 }
@@ -106,7 +119,11 @@ fn main() -> Result<()> {
                 cmd, cwd, exit, duration, shell_name, user, hostname, session,
             );
             let conn = db::open()?;
-            db::insert(&conn, &r)?;
+            let command_id = db::insert(&conn, &r)?;
+            let steps = parse::parse_pipeline(&r.command);
+            if !steps.is_empty() {
+                db::insert_pipeline_steps(&conn, command_id, &steps)?;
+            }
         }
 
         Commands::Log { limit } => {
@@ -137,6 +154,19 @@ fn main() -> Result<()> {
             let top = db::top_commands(&conn, 20)?;
             let hourly = db::hourly_distribution(&conn)?;
             display::print_stats(total, avg_ms, &top, &hourly);
+        }
+
+        Commands::Tools { limit } => {
+            let conn = db::open()?;
+            let tools = db::top_tools(&conn, limit)?;
+            display::print_tools(&tools);
+        }
+
+        Commands::Pipes { limit } => {
+            let conn = db::open()?;
+            let patterns = db::top_pipelines(&conn, limit)?;
+            let bigrams = db::top_bigrams(&conn, limit)?;
+            display::print_pipes(&patterns, &bigrams);
         }
 
         Commands::DbPath => {

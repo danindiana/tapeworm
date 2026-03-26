@@ -93,6 +93,7 @@ pub fn print_stats(
     println!();
 
     println!("{}", "Activity by hour (UTC):".bold());
+
     let max_count = hourly.iter().map(|(_, c)| *c).max().unwrap_or(1);
     for h in 0i64..24 {
         let count = hourly
@@ -107,5 +108,83 @@ pub fn print_stats(
         };
         let bar = "#".repeat(bar_len);
         println!("{:02}:00  {:>5}  {}", h, count, bar.green());
+    }
+}
+
+pub fn print_tools(top_tools: &[(String, i64)]) {
+    if top_tools.is_empty() {
+        println!("{}", "No pipeline step data yet. Run some commands first.".yellow());
+        return;
+    }
+    println!("{}", "=== top tools (by pipeline step frequency) ===".bold().cyan());
+    let mut tbl = Table::new();
+    tbl.set_header(vec![
+        Cell::new("#").add_attribute(Attribute::Bold),
+        Cell::new("Count").add_attribute(Attribute::Bold),
+        Cell::new("Tool").add_attribute(Attribute::Bold),
+        Cell::new("").add_attribute(Attribute::Bold), // bar column
+    ]);
+    let max = top_tools.first().map(|(_, c)| *c).unwrap_or(1);
+    for (i, (tool, cnt)) in top_tools.iter().enumerate() {
+        let bar_len = ((*cnt as f64 / max as f64) * 30.0) as usize;
+        tbl.add_row(vec![
+            Cell::new((i + 1).to_string()),
+            Cell::new(cnt.to_string()).fg(Color::Yellow),
+            Cell::new(tool),
+            Cell::new("#".repeat(bar_len)).fg(Color::Green),
+        ]);
+    }
+    println!("{tbl}");
+}
+
+pub fn print_pipes(patterns: &[(String, i64)], bigrams: &[(String, String, i64)]) {
+    println!("{}", "=== top pipeline patterns ===".bold().cyan());
+    if patterns.is_empty() {
+        println!("{}", "No multi-step pipelines recorded yet.".yellow());
+    } else {
+        let mut tbl = Table::new();
+        tbl.set_header(vec![
+            Cell::new("#").add_attribute(Attribute::Bold),
+            Cell::new("Count").add_attribute(Attribute::Bold),
+            Cell::new("Pipeline").add_attribute(Attribute::Bold),
+        ]);
+        for (i, (pat, cnt)) in patterns.iter().enumerate() {
+            let display = if pat.len() > 70 {
+                format!("{}…", &pat[..69])
+            } else {
+                pat.clone()
+            };
+            tbl.add_row(vec![
+                Cell::new((i + 1).to_string()),
+                Cell::new(cnt.to_string()).fg(Color::Yellow),
+                Cell::new(display).fg(Color::Cyan),
+            ]);
+        }
+        println!("{tbl}");
+    }
+
+    println!();
+    println!("{}", "=== top pipe bigrams  (A | B) ===".bold().cyan());
+    if bigrams.is_empty() {
+        println!("{}", "No pipe bigrams recorded yet.".yellow());
+    } else {
+        let mut tbl = Table::new();
+        tbl.set_header(vec![
+            Cell::new("#").add_attribute(Attribute::Bold),
+            Cell::new("Count").add_attribute(Attribute::Bold),
+            Cell::new("From").add_attribute(Attribute::Bold),
+            Cell::new("→").add_attribute(Attribute::Bold),
+            Cell::new("To").add_attribute(Attribute::Bold),
+        ]);
+        for (i, (from, to, cnt)) in bigrams.iter().enumerate() {
+            tbl.add_row(vec![
+                Cell::new((i + 1).to_string()),
+                Cell::new(cnt.to_string()).fg(Color::Yellow),
+                Cell::new(from).fg(Color::Green),
+                Cell::new("→"),
+                Cell::new(to).fg(Color::Green),
+            ]);
+        }
+        println!("{tbl}");
     }
 }
