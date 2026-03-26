@@ -1,4 +1,6 @@
+use crate::db::SessionSummary;
 use crate::record::CommandRecord;
+use chrono::{Local, TimeZone};
 use colored::Colorize;
 use comfy_table::{Attribute, Cell, Color, Table};
 
@@ -108,6 +110,146 @@ pub fn print_stats(
         };
         let bar = "#".repeat(bar_len);
         println!("{:02}:00  {:>5}  {}", h, count, bar.green());
+    }
+}
+
+pub fn print_sessions(sessions: &[SessionSummary]) {
+    if sessions.is_empty() {
+        println!("{}", "No sessions recorded yet.".yellow());
+        return;
+    }
+    println!("{}", "=== sessions ===".bold().cyan());
+    let mut tbl = Table::new();
+    tbl.set_header(vec![
+        Cell::new("Session").add_attribute(Attribute::Bold),
+        Cell::new("Started").add_attribute(Attribute::Bold),
+        Cell::new("Duration").add_attribute(Attribute::Bold),
+        Cell::new("Cmds").add_attribute(Attribute::Bold),
+        Cell::new("Fails").add_attribute(Attribute::Bold),
+        Cell::new("Shell").add_attribute(Attribute::Bold),
+    ]);
+    for s in sessions {
+        let started = Local.timestamp_opt(s.start_unix, 0)
+            .single()
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| s.start_unix.to_string());
+        let wall_secs = (s.end_unix - s.start_unix).max(0);
+        let duration = fmt_duration(wall_secs);
+        let fail_cell = if s.failure_count > 0 {
+            Cell::new(s.failure_count.to_string()).fg(Color::Red)
+        } else {
+            Cell::new("0").fg(Color::Green)
+        };
+        tbl.add_row(vec![
+            Cell::new(&s.session_id[..8.min(s.session_id.len())]),
+            Cell::new(started),
+            Cell::new(duration),
+            Cell::new(s.cmd_count.to_string()).fg(Color::Yellow),
+            fail_cell,
+            Cell::new(&s.shell),
+        ]);
+    }
+    println!("{tbl}");
+}
+
+pub fn print_session_timeline(session_id: &str, records: &[CommandRecord]) {
+    if records.is_empty() {
+        println!("{}", "No commands found for that session.".yellow());
+        return;
+    }
+    println!("{} {}", "=== session".bold().cyan(), session_id.cyan().bold());
+    let home = dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut tbl = Table::new();
+    tbl.set_header(vec![
+        Cell::new("#").add_attribute(Attribute::Bold),
+        Cell::new("Time").add_attribute(Attribute::Bold),
+        Cell::new("Exit").add_attribute(Attribute::Bold),
+        Cell::new("ms").add_attribute(Attribute::Bold),
+        Cell::new("Dir").add_attribute(Attribute::Bold),
+        Cell::new("Command").add_attribute(Attribute::Bold),
+    ]);
+    for (i, r) in records.iter().enumerate() {
+        let exit_cell = if r.exit_code == 0 {
+            Cell::new("0").fg(Color::Green)
+        } else {
+            Cell::new(r.exit_code.to_string()).fg(Color::Red)
+        };
+        let cmd_display = if r.command.len() > 70 {
+            format!("{}…", &r.command[..69])
+        } else {
+            r.command.clone()
+        };
+        let cwd_display = if !home.is_empty() && r.cwd.starts_with(&home) {
+            format!("~{}", &r.cwd[home.len()..])
+        } else {
+            r.cwd.clone()
+        };
+        let ts = if r.timestamp_iso.len() >= 19 { &r.timestamp_iso[11..19] } else { &r.timestamp_iso };
+        tbl.add_row(vec![
+            Cell::new((i + 1).to_string()),
+            Cell::new(ts),
+            exit_cell,
+            Cell::new(r.duration_ms.to_string()),
+            Cell::new(cwd_display),
+            Cell::new(cmd_display),
+        ]);
+    }
+    println!("{tbl}");
+}
+
+pub fn print_failure_chains(pairs: &[(CommandRecord, CommandRecord)]) {
+    if pairs.is_empty() {
+        println!("{}", "No failure chains found.".yellow());
+        return;
+    }
+    println!("{}", "=== failure chains (failed → next command) ===".bold().cyan());
+    let home = dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let shorten_cwd = |cwd: &str| -> String {
+        if !home.is_empty() && cwd.starts_with(&home) {
+            format!("~{}", &cwd[home.len()..])
+        } else {
+            cwd.to_string()
+        }
+    };
+    let mut tbl = Table::new();
+    tbl.set_header(vec![
+        Cell::new("Failed command").add_attribute(Attribute::Bold),
+        Cell::new("Exit").add_attribute(Attribute::Bold),
+        Cell::new("Dir").add_attribute(Attribute::Bold),
+        Cell::new("→ Next command").add_attribute(Attribute::Bold),
+    ]);
+    for (failed, next) in pairs {
+        let f_cmd = if failed.command.len() > 50 {
+            format!("{}…", &failed.command[..49])
+        } else {
+            failed.command.clone()
+        };
+        let n_cmd = if next.command.len() > 50 {
+            format!("{}…", &next.command[..49])
+        } else {
+            next.command.clone()
+        };
+        tbl.add_row(vec![
+            Cell::new(f_cmd).fg(Color::Red),
+            Cell::new(failed.exit_code.to_string()).fg(Color::Red),
+            Cell::new(shorten_cwd(&failed.cwd)),
+            Cell::new(n_cmd).fg(Color::Cyan),
+        ]);
+    }
+    println!("{tbl}");
+}
+
+fn fmt_duration(secs: i64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 

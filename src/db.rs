@@ -103,6 +103,32 @@ pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<CommandRecord>> {
     rows_to_records(&mut stmt, params![limit as i64])
 }
 
+pub fn recent_since(conn: &Connection, since_unix: i64, limit: usize) -> Result<Vec<CommandRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
+                exit_code, duration_ms, shell, user, hostname, session_id
+         FROM commands
+         WHERE timestamp_unix >= ?1
+         ORDER BY timestamp_unix DESC
+         LIMIT ?2",
+    )?;
+    rows_to_records(&mut stmt, params![since_unix, limit as i64])
+}
+
+pub fn recent_in_session(conn: &Connection, session_id: &str, limit: usize) -> Result<Vec<CommandRecord>> {
+    // Support prefix matching so the user can pass the 8-char truncated ID from `session list`
+    let pattern = format!("{}%", session_id);
+    let mut stmt = conn.prepare(
+        "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
+                exit_code, duration_ms, shell, user, hostname, session_id
+         FROM commands
+         WHERE session_id LIKE ?1
+         ORDER BY timestamp_unix ASC
+         LIMIT ?2",
+    )?;
+    rows_to_records(&mut stmt, params![pattern, limit as i64])
+}
+
 pub fn search(conn: &Connection, pattern: &str, limit: usize) -> Result<Vec<CommandRecord>> {
     let like = format!("%{}%", pattern);
     let mut stmt = conn.prepare(
@@ -124,6 +150,99 @@ pub fn all(conn: &Connection) -> Result<Vec<CommandRecord>> {
          ORDER BY timestamp_unix ASC",
     )?;
     rows_to_records(&mut stmt, params![])
+}
+
+// --- Session queries ---
+
+pub struct SessionSummary {
+    pub session_id: String,
+    pub start_unix: i64,
+    pub end_unix: i64,
+    pub cmd_count: i64,
+    pub failure_count: i64,
+    pub shell: String,
+}
+
+pub fn list_sessions(conn: &Connection, limit: usize) -> Result<Vec<SessionSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+             session_id,
+             MIN(timestamp_unix) as start_unix,
+             MAX(timestamp_unix) as end_unix,
+             COUNT(*)            as cmd_count,
+             SUM(CASE WHEN exit_code != 0 THEN 1 ELSE 0 END) as failure_count,
+             MAX(shell)          as shell
+         FROM commands
+         WHERE session_id != ''
+         GROUP BY session_id
+         ORDER BY start_unix DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok(SessionSummary {
+            session_id:    row.get(0)?,
+            start_unix:    row.get(1)?,
+            end_unix:      row.get(2)?,
+            cmd_count:     row.get(3)?,
+            failure_count: row.get(4)?,
+            shell:         row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Commands that ran immediately after a non-zero exit within the same session.
+/// Returns (failed_cmd, recovery_cmd) pairs ordered by failure time descending.
+pub fn failure_chains(conn: &Connection, limit: usize) -> Result<Vec<(CommandRecord, CommandRecord)>> {
+    // Find the command with the next-higher id in the same session after a failure.
+    let mut stmt = conn.prepare(
+        "SELECT
+             f.id, f.timestamp_unix, f.timestamp_iso, f.command, f.cwd,
+             f.exit_code, f.duration_ms, f.shell, f.user, f.hostname, f.session_id,
+             r.id, r.timestamp_unix, r.timestamp_iso, r.command, r.cwd,
+             r.exit_code, r.duration_ms, r.shell, r.user, r.hostname, r.session_id
+         FROM commands f
+         JOIN commands r
+           ON r.session_id = f.session_id
+          AND r.id = (
+              SELECT MIN(id) FROM commands
+              WHERE session_id = f.session_id AND id > f.id
+          )
+         WHERE f.exit_code != 0
+           AND f.session_id != ''
+         ORDER BY f.timestamp_unix DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        let failed = CommandRecord {
+            id:             Some(row.get(0)?),
+            timestamp_unix: row.get(1)?,
+            timestamp_iso:  row.get(2)?,
+            command:        row.get(3)?,
+            cwd:            row.get(4)?,
+            exit_code:      row.get(5)?,
+            duration_ms:    row.get(6)?,
+            shell:          row.get(7)?,
+            user:           row.get(8)?,
+            hostname:       row.get(9)?,
+            session_id:     row.get(10)?,
+        };
+        let recovery = CommandRecord {
+            id:             Some(row.get(11)?),
+            timestamp_unix: row.get(12)?,
+            timestamp_iso:  row.get(13)?,
+            command:        row.get(14)?,
+            cwd:            row.get(15)?,
+            exit_code:      row.get(16)?,
+            duration_ms:    row.get(17)?,
+            shell:          row.get(18)?,
+            user:           row.get(19)?,
+            hostname:       row.get(20)?,
+            session_id:     row.get(21)?,
+        };
+        Ok((failed, recovery))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 pub fn top_commands(conn: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
