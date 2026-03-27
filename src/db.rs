@@ -407,6 +407,7 @@ pub fn get_unembedded(conn: &Connection, limit: usize) -> Result<Vec<(i64, Strin
 }
 
 /// Returns count of commands without embeddings.
+#[allow(dead_code)]
 pub fn unembedded_count(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM commands WHERE id NOT IN (SELECT command_id FROM command_embeddings)",

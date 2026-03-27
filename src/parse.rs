@@ -156,7 +156,7 @@ pub fn extract_tool(step: &str) -> String {
             }
             continue;
         }
-        skip_flags = false;
+        let _ = skip_flags; // consumed above; reset is implicit via `return` below
         // Strip any path prefix (e.g. `/usr/bin/grep` → `grep`)
         return tok.rsplit('/').next().unwrap_or(tok).to_string();
     }
