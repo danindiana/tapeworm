@@ -132,31 +132,45 @@ pub fn redact_command(cmd: &str) -> String {
 /// We intentionally do *not* handle every POSIX shell construct (process
 /// substitution `<(...)`, arithmetic `$((...))`, heredocs, etc.).  The goal is
 /// to correctly tokenize the patterns that most commonly carry credentials.
+///
+/// Backtick nesting: POSIX requires `\`` to escape a backtick inside a backtick
+/// span.  Our backslash-escape handler consumes `\`` as an ordinary escaped
+/// character, so `in_backtick` is never toggled by it — nested backticks are
+/// handled correctly without an explicit depth counter.
 fn tokenize(s: &str) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
     let mut in_double = false;
-    let mut subshell_depth: usize = 0; // depth inside $(…) / (…)
+    let mut in_backtick = false;           // inside `…` command substitution
+    let mut subshell_depth: usize = 0;    // depth inside $(…) / (…)
     let mut chars = s.chars().peekable();
 
     while let Some(ch) = chars.next() {
         match ch {
-            // ── Backslash escape ──
+            // ── Backslash escape — consumes next char verbatim (handles \` inside backticks) ──
             '\\' => {
                 current.push(ch);
                 if let Some(next) = chars.next() {
                     current.push(next);
                 }
             }
-            // ── Single-quote toggle (only outside double-quotes and subshells) ──
-            '\'' if !in_double => {
+            // ── Single-quote toggle ──
+            '\'' if !in_double && !in_backtick => {
                 in_single = !in_single;
                 current.push(ch);
             }
             // ── Double-quote toggle ──
             '"' if !in_single => {
                 in_double = !in_double;
+                current.push(ch);
+            }
+            // ── Backtick: toggle legacy command substitution span ──
+            // Single-quoted backticks are literal and handled by the '\'' arm above.
+            // Inside double-quotes, backticks ARE still command substitutions (POSIX),
+            // so we track them there too.
+            '`' if !in_single => {
+                in_backtick = !in_backtick;
                 current.push(ch);
             }
             // ── Dollar-paren: start of $(...) subshell ──
@@ -178,7 +192,7 @@ fn tokenize(s: &str) -> Vec<String> {
                 current.push(ch);
             }
             // ── Whitespace: token boundary (only at top level) ──
-            ' ' | '\t' if !in_single && !in_double && subshell_depth == 0 => {
+            ' ' | '\t' if !in_single && !in_double && !in_backtick && subshell_depth == 0 => {
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));
                 }
@@ -288,6 +302,46 @@ mod tests {
             redact_command(r#"curl --token "$(cat /tmp/token)" https://api.example.com"#),
             "curl --token <REDACTED> https://api.example.com"
         );
+    }
+
+    // ── Backtick command substitution ────────────────────────────────────────
+
+    #[test]
+    fn backtick_space_separated() {
+        // `--token `cat /tmp/token`` — the backtick span must stay as one token
+        assert_eq!(
+            redact_command("curl --token `cat /tmp/token` https://api.example.com"),
+            "curl --token <REDACTED> https://api.example.com"
+        );
+    }
+
+    #[test]
+    fn backtick_concatenated_to_flag() {
+        // `-p`cat /tmp/pass`` — no space; handled by prefix-match (was already working,
+        // but verify the backtick state machine doesn't interfere)
+        assert_eq!(
+            redact_command("mysql -p`cat /tmp/pass` -h localhost"),
+            "mysql -p<REDACTED> -h localhost"
+        );
+    }
+
+    #[test]
+    fn backtick_with_args_inside() {
+        // Multi-word command inside backticks: `vault kv get -field=token secret/app`
+        assert_eq!(
+            redact_command("curl --token `vault kv get -field=token secret/app` https://host"),
+            "curl --token <REDACTED> https://host"
+        );
+    }
+
+    #[test]
+    fn backtick_escaped_inside_does_not_close() {
+        // \` inside a backtick span is an escaped backtick (POSIX nesting),
+        // not a closing delimiter — the span should continue.
+        // Outer form: --token `echo \`whoami\`` (double-escaped in Rust string)
+        let cmd = "curl --token `echo \\`whoami\\`` https://host";
+        let out = redact_command(cmd);
+        assert_eq!(out, "curl --token <REDACTED> https://host");
     }
 
     // ── -p overloading note ──────────────────────────────────────────────────
