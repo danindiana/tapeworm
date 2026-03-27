@@ -118,9 +118,26 @@ fn flush(steps: &mut Vec<(String, String)>, current: &str, connector: &str) {
     }
 }
 
-/// Common wrapper commands whose argv[0] is not the actual tool.
+/// Wrapper commands that take only flags before the real command.
+/// Flag-skipping is enabled after any of these are seen.
 const WRAPPERS: &[&str] = &[
-    "sudo", "env", "time", "nice", "nohup", "watch", "command", "builtin",
+    // privilege / environment
+    "sudo", "env", "doas",
+    // scheduling / resource control (flag-only forms: nice -n N, ionice -c C -n N, chrt -f 99)
+    "nice", "ionice", "chrt",
+    // buffering / I/O control (flags like -oL)
+    "stdbuf",
+    // execution control
+    "nohup", "time",
+    // shell builtins and meta-wrappers
+    "watch", "command", "builtin",
+];
+
+/// Wrappers that take exactly one positional (non-flag) argument before the command.
+/// `skip_next` is set when these are encountered so the argument is consumed.
+/// Example: `timeout 30 curl` — 30 is a bare positional, not a flag.
+const WRAPPERS_POSITIONAL: &[&str] = &[
+    "timeout",   // timeout DURATION CMD
 ];
 
 /// Extract the tool name from a pipeline step string.
@@ -130,11 +147,13 @@ const WRAPPERS: &[&str] = &[
 ///
 /// Short flags of the form `-X` (exactly 2 chars) are assumed to consume the
 /// following token as their argument (e.g. `sudo -u root cmd` → `cmd`).
+/// Wrapper detection always takes precedence over flag-skipping so that
+/// chained wrappers like `sudo timeout 60 rsync` are handled correctly.
 pub fn extract_tool(step: &str) -> String {
     let mut skip_flags = false;
-    let mut skip_next = false; // true when a short flag like -u consumed its argument slot
+    let mut skip_next = false; // true when a short flag or positional-arg wrapper consumed a slot
     for tok in step.split_ascii_whitespace() {
-        // Consume argument slot of a preceding short flag (e.g. the "root" in "-u root")
+        // Consume argument slot of a preceding short flag or positional wrapper arg
         if skip_next {
             skip_next = false;
             continue;
@@ -143,9 +162,14 @@ pub fn extract_tool(step: &str) -> String {
         if looks_like_assignment(tok) {
             continue;
         }
-        // Skip known wrapper commands and enable flag-skipping after them
+        // Wrapper detection before flag-skipping: handles chained wrappers correctly.
         if WRAPPERS.contains(&tok) {
             skip_flags = true;
+            continue;
+        }
+        // Wrappers with one bare positional argument (e.g. timeout DURATION)
+        if WRAPPERS_POSITIONAL.contains(&tok) {
+            skip_next = true;
             continue;
         }
         // Skip flags belonging to the preceding wrapper
@@ -249,6 +273,24 @@ mod tests {
         assert_eq!(tools("FOO=bar BAZ=qux grep pattern file"), vec!["grep"]);
         assert_eq!(tools("env PATH=/usr/local/bin cargo build"), vec!["cargo"]);
         assert_eq!(tools("time nice -n 10 make -j4"), vec!["make"]);
+    }
+
+    #[test]
+    fn wrapper_stripping_extended() {
+        // stdbuf: line-buffer output of a command
+        assert_eq!(tools("stdbuf -oL grep foo /var/log/syslog"), vec!["grep"]);
+        // timeout: kill after N seconds
+        assert_eq!(tools("timeout 30 curl https://example.com"), vec!["curl"]);
+        // ionice: I/O scheduling class
+        assert_eq!(tools("ionice -c 3 rsync -a /src/ /dst/"), vec!["rsync"]);
+        // doas: OpenBSD sudo equivalent
+        assert_eq!(tools("doas apt upgrade"), vec!["apt"]);
+        // chrt: realtime scheduling
+        assert_eq!(tools("chrt -f 99 dd if=/dev/zero of=/dev/null"), vec!["dd"]);
+        // nohup survives logout
+        assert_eq!(tools("nohup python3 train.py &"), vec!["python3"]);
+        // chained wrappers: sudo + timeout + the real tool
+        assert_eq!(tools("sudo timeout 60 rsync -avz /src /dst"), vec!["rsync"]);
     }
 
     #[test]

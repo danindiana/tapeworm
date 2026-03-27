@@ -57,12 +57,23 @@ _FORBIDDEN = re.compile(
 
 
 def _validate_select(sql: str) -> str | None:
-    """Return an error string if the query is not a safe SELECT, else None."""
+    """Return an error string if the query is not a safe SELECT, else None.
+
+    Two-step check:
+    1. Must start with SELECT or WITH (CTEs).
+    2. Forbidden write/admin keywords must not appear *outside* string literals.
+       Single-quoted literals are stripped before scanning so that a legitimate
+       query like WHERE command LIKE '%DROP TABLE%' is not rejected.
+       Note: double-quoted identifiers (e.g. "ALTER") are not stripped — using
+       SQL keywords as quoted column names is unusual enough not to warrant it.
+    """
     stripped = sql.strip()
     upper = stripped.upper()
     if not (upper.startswith("SELECT") or upper.startswith("WITH")):
         return "Only SELECT (and CTEs starting with WITH ... SELECT) are permitted."
-    m = _FORBIDDEN.search(stripped)
+    # Strip single-quoted string literals (handles '' escape sequences inside strings)
+    sql_no_literals = re.sub(r"'(?:[^']|'')*'", "''", stripped)
+    m = _FORBIDDEN.search(sql_no_literals)
     if m:
         return f"Forbidden keyword '{m.group()}' detected — only read queries are allowed."
     return None
