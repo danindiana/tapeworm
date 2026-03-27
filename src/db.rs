@@ -25,54 +25,105 @@ pub fn open() -> Result<Connection> {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
+    // Migration ledger: each applied version is recorded with a timestamp.
+    // Must be created before any migration check.
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA foreign_keys=ON;
-
-         CREATE TABLE IF NOT EXISTS commands (
-             id             INTEGER PRIMARY KEY AUTOINCREMENT,
-             timestamp_unix INTEGER NOT NULL,
-             timestamp_iso  TEXT    NOT NULL,
-             command        TEXT    NOT NULL,
-             cwd            TEXT    NOT NULL,
-             exit_code      INTEGER NOT NULL DEFAULT 0,
-             duration_ms    INTEGER NOT NULL DEFAULT 0,
-             shell          TEXT    NOT NULL DEFAULT 'unknown',
-             user           TEXT    NOT NULL DEFAULT '',
-             hostname       TEXT    NOT NULL DEFAULT '',
-             session_id     TEXT    NOT NULL DEFAULT ''
-         );
-
-         CREATE INDEX IF NOT EXISTS idx_commands_ts
-             ON commands(timestamp_unix DESC);
-         CREATE INDEX IF NOT EXISTS idx_commands_cmd
-             ON commands(command);
-         CREATE INDEX IF NOT EXISTS idx_commands_session
-             ON commands(session_id);
-
-         CREATE TABLE IF NOT EXISTS pipeline_steps (
-             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-             command_id   INTEGER NOT NULL REFERENCES commands(id) ON DELETE CASCADE,
-             step_index   INTEGER NOT NULL,
-             tool         TEXT    NOT NULL,
-             raw          TEXT    NOT NULL,
-             connector    TEXT    NOT NULL DEFAULT ''
-         );
-         CREATE INDEX IF NOT EXISTS idx_ps_command_id ON pipeline_steps(command_id);
-         CREATE INDEX IF NOT EXISTS idx_ps_tool       ON pipeline_steps(tool);
-
-         CREATE TABLE IF NOT EXISTS command_embeddings (
-             command_id  INTEGER PRIMARY KEY REFERENCES commands(id) ON DELETE CASCADE,
-             model       TEXT    NOT NULL,
-             embedding   BLOB    NOT NULL   -- packed little-endian f32 array
+         CREATE TABLE IF NOT EXISTS schema_versions (
+             version    INTEGER PRIMARY KEY,
+             applied_at TEXT    NOT NULL
          );",
     )?;
-    // Additive migration: add gap_ms if it doesn't exist yet.
-    // SQLite has no ADD COLUMN IF NOT EXISTS; ignoring the error is idiomatic.
-    let _ = conn.execute(
-        "ALTER TABLE commands ADD COLUMN gap_ms INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
+
+    // v1: base schema
+    apply_migration(conn, 1, || {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS commands (
+                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                 timestamp_unix INTEGER NOT NULL,
+                 timestamp_iso  TEXT    NOT NULL,
+                 command        TEXT    NOT NULL,
+                 cwd            TEXT    NOT NULL,
+                 exit_code      INTEGER NOT NULL DEFAULT 0,
+                 duration_ms    INTEGER NOT NULL DEFAULT 0,
+                 shell          TEXT    NOT NULL DEFAULT 'unknown',
+                 user           TEXT    NOT NULL DEFAULT '',
+                 hostname       TEXT    NOT NULL DEFAULT '',
+                 session_id     TEXT    NOT NULL DEFAULT ''
+             );
+             CREATE INDEX IF NOT EXISTS idx_commands_ts
+                 ON commands(timestamp_unix DESC);
+             CREATE INDEX IF NOT EXISTS idx_commands_cmd
+                 ON commands(command);
+             CREATE INDEX IF NOT EXISTS idx_commands_session
+                 ON commands(session_id);
+
+             CREATE TABLE IF NOT EXISTS pipeline_steps (
+                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                 command_id   INTEGER NOT NULL REFERENCES commands(id) ON DELETE CASCADE,
+                 step_index   INTEGER NOT NULL,
+                 tool         TEXT    NOT NULL,
+                 raw          TEXT    NOT NULL,
+                 connector    TEXT    NOT NULL DEFAULT ''
+             );
+             CREATE INDEX IF NOT EXISTS idx_ps_command_id ON pipeline_steps(command_id);
+             CREATE INDEX IF NOT EXISTS idx_ps_tool       ON pipeline_steps(tool);
+
+             CREATE TABLE IF NOT EXISTS command_embeddings (
+                 command_id  INTEGER PRIMARY KEY REFERENCES commands(id) ON DELETE CASCADE,
+                 model       TEXT    NOT NULL,
+                 embedding   BLOB    NOT NULL
+             );",
+        )?;
+        Ok(())
+    })?;
+
+    // v2: gap_ms column on commands.
+    // Bootstrap guard: existing DBs that already have gap_ms (added before the ledger)
+    // skip the ALTER rather than failing with "duplicate column".
+    apply_migration(conn, 2, || {
+        let has_col: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('commands') WHERE name = 'gap_ms'",
+            [],
+            |r| r.get::<_, i64>(0),
+        ).map(|n| n > 0).unwrap_or(false);
+        if !has_col {
+            conn.execute(
+                "ALTER TABLE commands ADD COLUMN gap_ms INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+/// Run a migration if it has not been recorded in schema_versions.
+/// On success, inserts the version into the ledger.
+/// If the migration closure fails, the error propagates and the version is NOT recorded.
+fn apply_migration<F>(conn: &Connection, version: i64, migration: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let already_applied: bool = conn.query_row(
+        "SELECT COUNT(*) FROM schema_versions WHERE version = ?1",
+        params![version],
+        |r| r.get::<_, i64>(0),
+    ).map(|n| n > 0).unwrap_or(false);
+
+    if already_applied {
+        return Ok(());
+    }
+
+    migration()?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?1, ?2)",
+        params![version, now],
+    )?;
     Ok(())
 }
 
@@ -416,6 +467,17 @@ pub fn hourly_distribution(conn: &Connection) -> Result<Vec<(i64, i64)>> {
     )?;
     let rows = stmt.query_map(params![], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Returns (version, applied_at) pairs from the migration ledger, ascending.
+pub fn schema_versions(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT version, applied_at FROM schema_versions ORDER BY version ASC",
+    )?;
+    let rows = stmt.query_map(params![], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }

@@ -77,6 +77,57 @@ pub fn load() -> Config {
     }
 }
 
+/// Severity of a validation issue.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Severity { Error, Warning }
+
+/// A single validation issue with its severity and message.
+#[derive(Debug, Clone)]
+pub struct Issue {
+    pub severity: Severity,
+    pub message:  String,
+}
+
+impl Issue {
+    fn err(msg: impl Into<String>)  -> Self { Self { severity: Severity::Error,   message: msg.into() } }
+    fn warn(msg: impl Into<String>) -> Self { Self { severity: Severity::Warning, message: msg.into() } }
+}
+
+/// Validate a loaded config and return any issues found.
+/// An empty Vec means the config is fully valid.
+pub fn validate(cfg: &Config) -> Vec<Issue> {
+    let mut issues: Vec<Issue> = Vec::new();
+
+    // ollama.url must look like an HTTP URL
+    let url = cfg.ollama.url.trim();
+    if url.is_empty() {
+        issues.push(Issue::err("ollama.url is empty"));
+    } else if !url.starts_with("http://") && !url.starts_with("https://") {
+        issues.push(Issue::err(format!(
+            "ollama.url does not start with http:// or https://: {:?}", url
+        )));
+    } else if url.contains(char::is_whitespace) {
+        issues.push(Issue::err(format!("ollama.url contains whitespace: {:?}", url)));
+    }
+
+    // ollama.model must be non-empty
+    if cfg.ollama.model.trim().is_empty() {
+        issues.push(Issue::err("ollama.model is empty"));
+    }
+
+    // display.log_limit: 0 would silently show nothing
+    if cfg.display.log_limit == 0 {
+        issues.push(Issue::err("display.log_limit is 0 — `tapeworm log` would show no output"));
+    } else if cfg.display.log_limit > 10_000 {
+        issues.push(Issue::warn(format!(
+            "display.log_limit is {} — very large default may be slow on big histories",
+            cfg.display.log_limit
+        )));
+    }
+
+    issues
+}
+
 /// Write a default config file if none exists. Returns the path.
 pub fn init_default() -> Result<PathBuf> {
     let path = config_path();

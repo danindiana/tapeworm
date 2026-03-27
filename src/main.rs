@@ -13,6 +13,7 @@ mod timefilter;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use colored::Colorize;
 use record::CommandRecord;
 use std::env;
 
@@ -163,11 +164,20 @@ enum Commands {
         all: bool,
     },
 
-    /// Show active configuration path and values
-    Config,
+    /// Show active configuration path and values, or validate the config file
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigCmd>,
+    },
 
     /// Print path to the SQLite database file
     DbPath,
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Validate the config file and report errors or warnings
+    Validate,
 }
 
 #[derive(Subcommand)]
@@ -463,15 +473,74 @@ fn main() -> Result<()> {
             display::print_taint(&pipelines, all);
         }
 
-        Commands::Config => {
-            let path = config::config_path();
-            println!("Config file: {}", path.display());
-            if path.exists() {
-                println!("{}", std::fs::read_to_string(&path)?);
-            } else {
-                let created = config::init_default()?;
-                println!("Created default config at {}", created.display());
-                println!("{}", std::fs::read_to_string(&created)?);
+        Commands::Config { action } => {
+            match action {
+                None => {
+                    let path = config::config_path();
+                    println!("Config file: {}", path.display());
+                    if path.exists() {
+                        println!("{}", std::fs::read_to_string(&path)?);
+                    } else {
+                        let created = config::init_default()?;
+                        println!("Created default config at {}", created.display());
+                        println!("{}", std::fs::read_to_string(&created)?);
+                    }
+                }
+                Some(ConfigCmd::Validate) => {
+                    let path = config::config_path();
+                    println!("Config file: {}", path.display());
+
+                    // Parse separately from load() so we can distinguish missing vs malformed
+                    let (parsed_cfg, parse_err) = if path.exists() {
+                        match std::fs::read_to_string(&path)
+                            .map_err(anyhow::Error::from)
+                            .and_then(|t| toml::from_str::<config::Config>(&t).map_err(Into::into))
+                        {
+                            Ok(c)  => (c, None),
+                            Err(e) => (config::Config::default(), Some(e.to_string())),
+                        }
+                    } else {
+                        println!("  (no config file — using built-in defaults)");
+                        (config::Config::default(), None)
+                    };
+
+                    if let Some(ref err) = parse_err {
+                        println!("  {} TOML parse error: {}", "✗".red(), err);
+                        std::process::exit(1);
+                    }
+
+                    let issues = config::validate(&parsed_cfg);
+                    if issues.is_empty() {
+                        println!("  {} config is valid", "✓".green());
+                    } else {
+                        for issue in &issues {
+                            match issue.severity {
+                                config::Severity::Error   =>
+                                    println!("  {} {}", "✗".red(), issue.message),
+                                config::Severity::Warning =>
+                                    println!("  {} {}", "⚠".yellow(), issue.message),
+                            }
+                        }
+                        let errors = issues.iter().filter(|i| i.severity == config::Severity::Error).count();
+                        if errors > 0 {
+                            std::process::exit(1);
+                        }
+                    }
+
+                    // Also show migration ledger state
+                    println!();
+                    println!("DB: {}", db::db_path().display());
+                    match db::open().and_then(|c| db::schema_versions(&c)) {
+                        Ok(versions) if versions.is_empty() =>
+                            println!("  migrations: ledger empty (DB not yet opened?)"),
+                        Ok(versions) => {
+                            for (v, ts) in &versions {
+                                println!("  {} v{} applied {}", "✓".green(), v, ts);
+                            }
+                        }
+                        Err(e) => println!("  {} could not read migration ledger: {}", "⚠".yellow(), e),
+                    }
+                }
             }
         }
 

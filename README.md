@@ -104,6 +104,7 @@ Start a new shell session. Recording begins immediately.
 | `embed [--model MODEL] [--url URL] [-l N]` | Generate Ollama embeddings |
 | `semantic QUERY [-l N] [--model MODEL] [--url URL]` | Natural language similarity search |
 | `config` | Show config path and values |
+| `config validate` | Validate config file and show migration ledger |
 | `db-path` | Print path to the SQLite database |
 
 ### Common examples
@@ -463,7 +464,14 @@ CREATE TABLE command_embeddings (
 );
 ```
 
-The `gap_ms` column was added in v0.2 via `ALTER TABLE`. Existing rows get `0` (no data — correct).
+Schema migrations are tracked in a `schema_versions` ledger table (version, applied_at timestamp). The migration runner checks this table before each migration and skips already-applied versions. Existing databases are bootstrapped on first open: the column-existence check prevents duplicate-column errors on the `gap_ms` migration.
+
+```bash
+# Show which schema versions are applied and when
+tapeworm config validate
+```
+
+Current versions: v1 = base schema, v2 = gap_ms column.
 
 **Direct SQL access:**
 ```bash
