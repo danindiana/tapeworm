@@ -153,3 +153,114 @@ log_limit = 50
     std::fs::write(&path, default_text)?;
     Ok(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid() -> Config { Config::default() }
+
+    #[test]
+    fn default_config_is_valid() {
+        assert!(validate(&valid()).is_empty(), "default config should have no issues");
+    }
+
+    #[test]
+    fn https_url_is_valid() {
+        let mut cfg = valid();
+        cfg.ollama.url = "https://remote.example.com:11434".to_string();
+        assert!(validate(&cfg).is_empty());
+    }
+
+    #[test]
+    fn empty_url_is_error() {
+        let mut cfg = valid();
+        cfg.ollama.url = String::new();
+        let issues = validate(&cfg);
+        assert!(
+            issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("url")),
+            "expected url error, got: {:?}", issues
+        );
+    }
+
+    #[test]
+    fn non_http_url_is_error() {
+        for bad in &["ftp://localhost:11434", "localhost:11434", "//localhost"] {
+            let mut cfg = valid();
+            cfg.ollama.url = bad.to_string();
+            let issues = validate(&cfg);
+            assert!(
+                issues.iter().any(|i| i.severity == Severity::Error),
+                "expected error for url {:?}, got: {:?}", bad, issues
+            );
+        }
+    }
+
+    #[test]
+    fn url_with_whitespace_is_error() {
+        let mut cfg = valid();
+        cfg.ollama.url = "http://local host:11434".to_string();
+        let issues = validate(&cfg);
+        assert!(
+            issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("whitespace")),
+            "expected whitespace error, got: {:?}", issues
+        );
+    }
+
+    #[test]
+    fn empty_model_is_error() {
+        let mut cfg = valid();
+        cfg.ollama.model = String::new();
+        let issues = validate(&cfg);
+        assert!(
+            issues.iter().any(|i| i.severity == Severity::Error && i.message.contains("model")),
+            "expected model error, got: {:?}", issues
+        );
+    }
+
+    #[test]
+    fn whitespace_only_model_is_error() {
+        let mut cfg = valid();
+        cfg.ollama.model = "   ".to_string();
+        let issues = validate(&cfg);
+        assert!(issues.iter().any(|i| i.severity == Severity::Error));
+    }
+
+    #[test]
+    fn zero_log_limit_is_error() {
+        let mut cfg = valid();
+        cfg.display.log_limit = 0;
+        let issues = validate(&cfg);
+        assert!(
+            issues.iter().any(|i| i.severity == Severity::Error),
+            "expected error for log_limit=0"
+        );
+    }
+
+    #[test]
+    fn large_log_limit_is_warning_not_error() {
+        let mut cfg = valid();
+        cfg.display.log_limit = 50_000;
+        let issues = validate(&cfg);
+        assert!(
+            issues.iter().any(|i| i.severity == Severity::Warning),
+            "expected warning for large log_limit"
+        );
+        assert!(
+            !issues.iter().any(|i| i.severity == Severity::Error),
+            "large log_limit should be a warning, not an error"
+        );
+    }
+
+    #[test]
+    fn multiple_issues_all_reported() {
+        let mut cfg = valid();
+        cfg.ollama.url   = "not-a-url".to_string();
+        cfg.ollama.model = String::new();
+        cfg.display.log_limit = 0;
+        let issues = validate(&cfg);
+        // All three fields are broken — expect at least 3 errors
+        let error_count = issues.iter().filter(|i| i.severity == Severity::Error).count();
+        assert!(error_count >= 3, "expected ≥3 errors, got {}: {:?}", error_count, issues);
+    }
+}

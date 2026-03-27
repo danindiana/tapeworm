@@ -757,6 +757,153 @@ pub fn tainted_step_rows(conn: &Connection) -> Result<Vec<crate::taint::StepRow>
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// Open an in-memory DB and run all migrations.
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn
+    }
+
+    /// Simulate a pre-ledger DB: commands table already has gap_ms (added by old
+    /// `let _ = ALTER TABLE` idiom) but schema_versions does not yet exist.
+    fn mem_legacy_with_gap_ms() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA foreign_keys=ON;
+             CREATE TABLE commands (
+                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                 timestamp_unix INTEGER NOT NULL,
+                 timestamp_iso  TEXT    NOT NULL,
+                 command        TEXT    NOT NULL,
+                 cwd            TEXT    NOT NULL,
+                 exit_code      INTEGER NOT NULL DEFAULT 0,
+                 duration_ms    INTEGER NOT NULL DEFAULT 0,
+                 gap_ms         INTEGER NOT NULL DEFAULT 0,
+                 shell          TEXT    NOT NULL DEFAULT 'unknown',
+                 user           TEXT    NOT NULL DEFAULT '',
+                 hostname       TEXT    NOT NULL DEFAULT '',
+                 session_id     TEXT    NOT NULL DEFAULT ''
+             );
+             CREATE TABLE pipeline_steps (
+                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                 command_id   INTEGER NOT NULL,
+                 step_index   INTEGER NOT NULL,
+                 tool         TEXT    NOT NULL,
+                 raw          TEXT    NOT NULL,
+                 connector    TEXT    NOT NULL DEFAULT ''
+             );
+             CREATE TABLE command_embeddings (
+                 command_id  INTEGER PRIMARY KEY,
+                 model       TEXT    NOT NULL,
+                 embedding   BLOB    NOT NULL
+             );",
+        ).unwrap();
+        conn
+    }
+
+    #[test]
+    fn fresh_migrate_records_both_versions() {
+        let conn = mem();
+        let versions = schema_versions(&conn).unwrap();
+        assert_eq!(versions.len(), 2, "expected v1 and v2 in ledger");
+        assert_eq!(versions[0].0, 1);
+        assert_eq!(versions[1].0, 2);
+    }
+
+    #[test]
+    fn migrate_is_idempotent() {
+        let conn = mem();
+        // Second call must not fail or duplicate ledger entries
+        migrate(&conn).unwrap();
+        let versions = schema_versions(&conn).unwrap();
+        assert_eq!(versions.len(), 2, "idempotent: still exactly 2 versions");
+    }
+
+    #[test]
+    fn bootstrap_legacy_db_with_gap_ms() {
+        // The exact situation every pre-ledger user's DB was in: gap_ms column
+        // already present, no schema_versions table.  migrate() must not fail.
+        let conn = mem_legacy_with_gap_ms();
+        migrate(&conn).unwrap();
+        let versions = schema_versions(&conn).unwrap();
+        // Both versions must be recorded (v2 skipped the ALTER but still recorded)
+        assert!(versions.iter().any(|(v, _)| *v == 1), "v1 not recorded");
+        assert!(versions.iter().any(|(v, _)| *v == 2), "v2 not recorded");
+    }
+
+    #[test]
+    fn gap_ms_column_present_after_fresh_migrate() {
+        let conn = mem();
+        let has_col: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('commands') WHERE name = 'gap_ms'",
+            [],
+            |r| r.get::<_, i64>(0),
+        ).map(|n| n > 0).unwrap();
+        assert!(has_col, "gap_ms column missing after migrate");
+    }
+
+    #[test]
+    fn insert_and_retrieve_round_trip() {
+        let conn = mem();
+        let r = crate::record::CommandRecord::new(
+            "ls -la".to_string(),
+            "/tmp".to_string(),
+            0, 12, 500,
+            "zsh".to_string(),
+            "test".to_string(),
+            "host".to_string(),
+            "test-session".to_string(),
+        );
+        let id = insert(&conn, &r).unwrap();
+        assert!(id > 0);
+        let records = recent(&conn, 10).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].command, "ls -la");
+        assert_eq!(records[0].gap_ms, 500);
+        assert_eq!(records[0].session_id, "test-session");
+    }
+
+    #[test]
+    fn migrate_before_ledger_then_again_is_safe() {
+        // A DB created by older code that ran execute_batch for v1 but never
+        // inserted schema_versions — simulated here by running v1 SQL directly.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE IF NOT EXISTS commands (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 timestamp_unix INTEGER NOT NULL,
+                 timestamp_iso TEXT NOT NULL,
+                 command TEXT NOT NULL,
+                 cwd TEXT NOT NULL,
+                 exit_code INTEGER NOT NULL DEFAULT 0,
+                 duration_ms INTEGER NOT NULL DEFAULT 0,
+                 shell TEXT NOT NULL DEFAULT 'unknown',
+                 user TEXT NOT NULL DEFAULT '',
+                 hostname TEXT NOT NULL DEFAULT '',
+                 session_id TEXT NOT NULL DEFAULT ''
+             );",
+        ).unwrap();
+        // No gap_ms, no schema_versions — simulate even older state
+        migrate(&conn).unwrap();
+        let versions = schema_versions(&conn).unwrap();
+        assert_eq!(versions.len(), 2);
+        // gap_ms must now exist
+        let has_col: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('commands') WHERE name = 'gap_ms'",
+            [],
+            |r| r.get::<_, i64>(0),
+        ).map(|n| n > 0).unwrap();
+        assert!(has_col);
+    }
+}
+
 fn rows_to_records(
     stmt: &mut rusqlite::Statement,
     params: impl rusqlite::Params,
