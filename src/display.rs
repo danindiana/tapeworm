@@ -462,14 +462,16 @@ pub fn print_taint(pipelines: &[TaintedPipeline], show_clean: bool) {
 
             let label_str = step.label.as_str();
             let label_cell = match &step.label {
-                TaintLabel::Clean        => label_str.dimmed().to_string(),
-                TaintLabel::TaintSource  => label_str.yellow().bold().to_string(),
+                TaintLabel::Clean         => label_str.dimmed().to_string(),
+                TaintLabel::TaintSource   => label_str.yellow().bold().to_string(),
                 TaintLabel::CredentialUse => label_str.yellow().to_string(),
-                TaintLabel::Propagated   => label_str.dimmed().to_string(),
-                TaintLabel::NetworkSink  => format!("{} ⚠", label_str).red().bold().to_string(),
-                TaintLabel::FileSink     => format!("{} ⚠", label_str).red().to_string(),
-                TaintLabel::ProcessSink  => format!("{} ⚠", label_str).red().to_string(),
-                TaintLabel::Discarded    => label_str.green().dimmed().to_string(),
+                TaintLabel::Propagated    => label_str.dimmed().to_string(),
+                TaintLabel::NetworkSink   => format!("{} ⚠", label_str).red().bold().to_string(),
+                TaintLabel::FileSink      => format!("{} ⚠", label_str).red().to_string(),
+                TaintLabel::ProcessSink   => format!("{} ⚠", label_str).red().to_string(),
+                TaintLabel::Discarded     => label_str.green().dimmed().to_string(),
+                // Orange: structural concern, not confirmed taint escape
+                TaintLabel::ResponseSink  => format!("{} ⚠", label_str).truecolor(255, 165, 0).to_string(),
             };
 
             // Truncate raw if long

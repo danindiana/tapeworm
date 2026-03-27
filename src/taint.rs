@@ -64,14 +64,14 @@ fn tool_behavior(tool: &str) -> TaintBehavior {
         "pv" | "mbuffer" | "buffer" |
         "openssl" | "gpg" | "gpg2" |
         "iconv" | "uni2ascii" |
-        "tput" | "expand" => TaintBehavior::Passthrough,
+        "tput" => TaintBehavior::Passthrough,
 
         // Discard — output is about the data, not the data itself
         "wc" |
         "md5sum" | "sha1sum" | "sha224sum" | "sha256sum" |
         "sha384sum" | "sha512sum" | "b2sum" | "cksum" | "sum" |
         "diff" | "cmp" | "sdiff" | "wdiff" |
-        "stat" | "file" | "du" | "wc" => TaintBehavior::Discard,
+        "stat" | "file" | "du" => TaintBehavior::Discard,
 
         // Network sinks — consume stdin/args, send to external endpoint, stdout = response
         "curl" | "wget" | "http" | "httpie" | "fetch" | "aria2c" |
@@ -115,25 +115,39 @@ pub enum TaintLabel {
     ProcessSink,
     /// Receives tainted stdin via `|`; tool discards data content (taint terminates).
     Discarded,
+    /// Structural concern: a file-writing step follows a `CredentialUse` step in the
+    /// same pipeline.  Taint did NOT propagate (the tool's stdout was not the secret),
+    /// but the authenticated response is being written to disk.
+    ///
+    /// Example: `curl --token <REDACTED> https://api/endpoint | tee /tmp/out.json`
+    ///   — tee receives HTTP response, not the token, but that response may be sensitive.
+    ResponseSink,
 }
 
 impl TaintLabel {
     /// True if this label represents a security concern worth highlighting.
     pub fn is_warning(&self) -> bool {
-        matches!(self, TaintLabel::CredentialUse | TaintLabel::NetworkSink
-                     | TaintLabel::FileSink | TaintLabel::ProcessSink)
+        matches!(
+            self,
+            TaintLabel::CredentialUse
+                | TaintLabel::NetworkSink
+                | TaintLabel::FileSink
+                | TaintLabel::ProcessSink
+                | TaintLabel::ResponseSink
+        )
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            TaintLabel::Clean        => "CLEAN",
+            TaintLabel::Clean         => "CLEAN",
             TaintLabel::CredentialUse => "CREDENTIAL-USE",
-            TaintLabel::TaintSource  => "TAINT-SOURCE",
-            TaintLabel::Propagated   => "PROPAGATED",
-            TaintLabel::NetworkSink  => "NETWORK-SINK",
-            TaintLabel::FileSink     => "FILE-SINK",
-            TaintLabel::ProcessSink  => "PROCESS-SINK",
-            TaintLabel::Discarded    => "DISCARDED",
+            TaintLabel::TaintSource   => "TAINT-SOURCE",
+            TaintLabel::Propagated    => "PROPAGATED",
+            TaintLabel::NetworkSink   => "NETWORK-SINK",
+            TaintLabel::FileSink      => "FILE-SINK",
+            TaintLabel::ProcessSink   => "PROCESS-SINK",
+            TaintLabel::Discarded     => "DISCARDED",
+            TaintLabel::ResponseSink  => "RESPONSE-SINK",
         }
     }
 }
@@ -147,7 +161,6 @@ pub struct AnnotatedStep {
 }
 
 pub struct TaintedPipeline {
-    pub command_id:    i64,
     pub command_text:  String,
     pub timestamp_iso: String,
     pub steps:         Vec<AnnotatedStep>,
@@ -162,6 +175,25 @@ pub struct StepRow {
     pub tool:          String,
     pub raw:           String,
     pub connector:     String,
+}
+
+/// Returns true if this tool writes its stdin/input to a file on disk.
+///
+/// Unlike `tool_behavior() == FileSink`, this also covers:
+///   - `tee`  — FileSink by behavior is Passthrough, but it writes to disk
+///   - `curl` / `wget` with `-o`/`-O`/`--output` flags
+fn is_response_writer(tool: &str, raw: &str) -> bool {
+    match tool_behavior(tool) {
+        TaintBehavior::FileSink => true,
+        _ => {
+            tool == "tee"
+                || (matches!(tool, "curl" | "wget")
+                    && (raw.contains(" -o ")
+                        || raw.contains(" -O ")
+                        || raw.ends_with(" -O")
+                        || raw.contains("--output")))
+        }
+    }
 }
 
 /// Annotate a sequence of pipeline steps (for one command, ordered by step_index).
@@ -225,7 +257,7 @@ pub fn build_tainted_pipelines(rows: Vec<StepRow>) -> Vec<TaintedPipeline> {
         let group = &rows[i..j];
         let labels = annotate(group);
 
-        let steps: Vec<AnnotatedStep> = group.iter().zip(labels.iter())
+        let mut steps: Vec<AnnotatedStep> = group.iter().zip(labels.iter())
             .map(|(row, label)| AnnotatedStep {
                 step_index: row.step_index,
                 tool:       row.tool.clone(),
@@ -235,10 +267,39 @@ pub fn build_tainted_pipelines(rows: Vec<StepRow>) -> Vec<TaintedPipeline> {
             })
             .collect();
 
+        // Second pass: ResponseSink detection.
+        //
+        // A Clean step that writes to a file and follows a CredentialUse step in
+        // the same pipeline may be storing an authenticated API response.  Taint
+        // did not propagate (the credential was consumed as an argument, not
+        // echoed to stdout), but the output is still potentially sensitive.
+        //
+        // Only `|` between the CredentialUse and the file-writer is required —
+        // `&&`/`;` separation means the write is unrelated to the request.
+        {
+            let mut credential_use_pipe_active = false;
+            for step in &mut steps {
+                if step.label == TaintLabel::CredentialUse && step.connector == "|" {
+                    credential_use_pipe_active = true;
+                } else if credential_use_pipe_active {
+                    if step.label == TaintLabel::Clean
+                        && is_response_writer(&step.tool, &step.raw)
+                    {
+                        step.label = TaintLabel::ResponseSink;
+                    }
+                    // Chain continues as long as we keep seeing | connectors
+                    if step.connector != "|" {
+                        credential_use_pipe_active = false;
+                    }
+                } else {
+                    credential_use_pipe_active = false;
+                }
+            }
+        }
+
         // Only include pipelines that have at least one non-Clean step
         if steps.iter().any(|s| s.label != TaintLabel::Clean) {
             pipelines.push(TaintedPipeline {
-                command_id:    group[0].command_id,
                 command_text:  group[0].command_text.clone(),
                 timestamp_iso: group[0].timestamp_iso.clone(),
                 steps,
@@ -387,6 +448,85 @@ mod tests {
         assert_eq!(ls[0], TaintLabel::TaintSource);
         assert_eq!(ls[1], TaintLabel::Propagated); // tee passes through; display adds note
         assert_eq!(ls[2], TaintLabel::Propagated);
+    }
+
+    // ── ResponseSink: authenticated response written to disk ────────────────
+    //
+    // These tests must go through `build_tainted_pipelines` because the second
+    // pass runs there, not in `annotate`.
+
+    /// Build a single-pipeline from specs and return its step labels.
+    fn full_labels(specs: &[(&str, &str, &str)]) -> Vec<TaintLabel> {
+        let rows = make_steps(specs);
+        let pipelines = build_tainted_pipelines(rows);
+        // If no pipeline was produced (all clean after both passes), return all Clean
+        if pipelines.is_empty() {
+            return vec![TaintLabel::Clean; specs.len()];
+        }
+        pipelines.into_iter().next().unwrap().steps
+            .into_iter().map(|s| s.label).collect()
+    }
+
+    #[test]
+    fn tee_after_credential_use_is_response_sink() {
+        // curl --token <REDACTED> | jq | tee /tmp/out.json
+        // jq and tee receive the HTTP response, not the token.
+        // tee writes the response to disk → ResponseSink.
+        let ls = full_labels(&[
+            ("curl", "curl --token <REDACTED> https://api.example.com", "|"),
+            ("jq",   "jq .result",                                       "|"),
+            ("tee",  "tee /tmp/out.json",                                 ""),
+        ]);
+        assert_eq!(ls[0], TaintLabel::CredentialUse);
+        assert_eq!(ls[1], TaintLabel::Clean);
+        assert_eq!(ls[2], TaintLabel::ResponseSink);
+    }
+
+    #[test]
+    fn direct_tee_after_credential_use() {
+        // curl --token <REDACTED> | tee /tmp/out.json  (no jq in between)
+        let ls = full_labels(&[
+            ("curl", "curl --token <REDACTED> https://api.example.com", "|"),
+            ("tee",  "tee /tmp/out.json",                                 ""),
+        ]);
+        assert_eq!(ls[0], TaintLabel::CredentialUse);
+        assert_eq!(ls[1], TaintLabel::ResponseSink);
+    }
+
+    #[test]
+    fn and_separated_file_write_is_not_response_sink() {
+        // curl --token <REDACTED> https://api && cp /tmp/existing /tmp/copy
+        // The cp is not receiving the curl response — they're separate commands.
+        let ls = full_labels(&[
+            ("curl", "curl --token <REDACTED> https://api", "&&"),
+            ("cp",   "cp /tmp/existing /tmp/copy",           ""),
+        ]);
+        assert_eq!(ls[0], TaintLabel::CredentialUse);
+        assert_eq!(ls[1], TaintLabel::Clean); // && breaks the pipeline
+    }
+
+    #[test]
+    fn wget_output_flag_is_response_sink() {
+        // wget --password <REDACTED> -O /tmp/data.xml
+        // Single step: credential use + output-to-file.
+        // wget is CredentialUse (first pass); the ResponseSink second pass applies
+        // only to downstream Clean steps — wget itself stays CredentialUse.
+        // (The -O behavior is noted in the tee note in display for now.)
+        let ls = full_labels(&[
+            ("wget", "wget --password <REDACTED> -O /tmp/data.xml", ""),
+        ]);
+        assert_eq!(ls[0], TaintLabel::CredentialUse);
+    }
+
+    #[test]
+    fn dd_after_credential_use_is_response_sink() {
+        // curl --token <REDACTED> | dd of=/tmp/dump.bin
+        let ls = full_labels(&[
+            ("curl", "curl --token <REDACTED> https://api/binary", "|"),
+            ("dd",   "dd of=/tmp/dump.bin",                         ""),
+        ]);
+        assert_eq!(ls[0], TaintLabel::CredentialUse);
+        assert_eq!(ls[1], TaintLabel::ResponseSink);
     }
 
     // ── No redacted steps → no taint ────────────────────────────────────────
