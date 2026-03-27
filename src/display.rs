@@ -1,4 +1,4 @@
-use crate::archetype::{Archetype, Classification, SessionFeatures};
+use crate::archetype::{compute_baseline, Archetype, Classification, SessionFeatures};
 use crate::db::{SessionSummary, ToolEdge};
 use crate::record::CommandRecord;
 use crate::taint::{TaintLabel, TaintedPipeline};
@@ -211,6 +211,7 @@ pub fn print_session_timeline(session_id: &str, records: &[CommandRecord]) {
         ]);
     }
     println!("{tbl}");
+    print_gap_histogram(records);
 }
 
 pub fn print_failure_chains(pairs: &[(CommandRecord, CommandRecord)]) {
@@ -255,6 +256,43 @@ pub fn print_failure_chains(pairs: &[(CommandRecord, CommandRecord)]) {
         ]);
     }
     println!("{tbl}");
+}
+
+/// Horizontal bar chart of gap_ms bucket distribution for a session.
+/// Only rendered when at least one gap_ms > 0.
+fn print_gap_histogram(records: &[CommandRecord]) {
+    let gaps: Vec<i64> = records.iter().filter(|r| r.gap_ms > 0).map(|r| r.gap_ms).collect();
+    if gaps.is_empty() {
+        return;
+    }
+
+    const BUCKETS: &[(&str, i64, i64)] = &[
+        ("<1s",   0,           1_000),
+        ("1-5s",  1_000,       5_000),
+        ("5-30s", 5_000,       30_000),
+        ("30-60s",30_000,      60_000),
+        ("1-5m",  60_000,      300_000),
+        (">5m",   300_000,     i64::MAX),
+    ];
+
+    let counts: Vec<usize> = BUCKETS.iter()
+        .map(|(_, lo, hi)| gaps.iter().filter(|&&g| g >= *lo && g < *hi).count())
+        .collect();
+    let max = counts.iter().copied().max().unwrap_or(1).max(1);
+
+    println!("{}", "  gap distribution:".dimmed());
+    for (i, (label, _, _)) in BUCKETS.iter().enumerate() {
+        let n = counts[i];
+        let bar_len = if n > 0 { (n * 24 / max).max(1) } else { 0 };
+        let bar = "▪".repeat(bar_len);
+        println!(
+            "  {:>6}  {:>3}  {}",
+            label.dimmed(),
+            n.to_string().dimmed(),
+            if n > 0 { bar.yellow().to_string() } else { String::new() }
+        );
+    }
+    println!();
 }
 
 /// Format a gap in milliseconds as a human-readable string: "4.2s", "2m3s".
@@ -432,6 +470,8 @@ pub fn print_archetypes(pairs: &[(SessionFeatures, Classification)]) {
         return;
     }
 
+    let baseline = compute_baseline(pairs);
+
     println!("{}", "=== session archetypes ===".bold().cyan());
     let mut tbl = Table::new();
     tbl.set_header(vec![
@@ -481,7 +521,35 @@ pub fn print_archetypes(pairs: &[(SessionFeatures, Classification)]) {
             "-".to_string()
         };
 
-        let flags = if c.interrupted { "⚠ interrupted" } else { "" };
+        // Assemble flags: interrupted warning + σ deviation indicators
+        let mut flag_parts: Vec<String> = Vec::new();
+        if c.interrupted {
+            flag_parts.push("⚠ interrupted".to_string());
+        }
+        if let Some(ref b) = baseline {
+            if b.failure_outlier(f.failure_rate) {
+                flag_parts.push(if f.failure_rate > b.failure_mean {
+                    "↑fail".to_string()
+                } else {
+                    "↓fail".to_string()
+                });
+            }
+            if b.gap_outlier(f.mean_gap_ms) {
+                flag_parts.push(if f.mean_gap_ms > b.gap_mean {
+                    "↑gap".to_string()
+                } else {
+                    "↓gap".to_string()
+                });
+            }
+            if b.entropy_outlier(f.tool_entropy) {
+                flag_parts.push(if f.tool_entropy > b.entropy_mean {
+                    "↑ent".to_string()
+                } else {
+                    "↓ent".to_string()
+                });
+            }
+        }
+        let flags = flag_parts.join(" ");
 
         let sid = &f.session_id;
         let sid_short = &sid[..8.min(sid.len())];
@@ -495,15 +563,151 @@ pub fn print_archetypes(pairs: &[(SessionFeatures, Classification)]) {
             fail_cell,
             Cell::new(gap_display).fg(Color::DarkGrey),
             Cell::new(entropy_display).fg(Color::DarkGrey),
-            Cell::new(flags).fg(Color::Red),
+            Cell::new(&flags).fg(Color::Red),
         ]);
     }
     println!("{tbl}");
+    let mut legend = "  burst=fast gaps  debugging=high fail  focused=low entropy  exploratory=high entropy".to_string();
+    if baseline.is_some() {
+        legend.push_str("  ↑↓=2σ outlier");
+    }
+    println!("{}", legend.dimmed());
+}
+
+/// Detailed classification explanation for a single session.
+/// Shows each decision gate with its feature value, threshold, and outcome.
+pub fn print_archetype_explain(f: &SessionFeatures, c: &Classification) {
+    let sid_short = &f.session_id[..8.min(f.session_id.len())];
     println!(
-        "{}",
-        "  burst=fast gaps  debugging=high fail  focused=low entropy  exploratory=high entropy"
-            .dimmed()
+        "{} {}",
+        "=== archetype explain:".bold().cyan(),
+        sid_short.cyan().bold()
     );
+
+    let started = Local.timestamp_opt(f.start_unix, 0)
+        .single()
+        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| f.start_unix.to_string());
+
+    println!(
+        "  session {}   started {}   shell {}   commands {}",
+        sid_short.dimmed(),
+        started.dimmed(),
+        f.shell.dimmed(),
+        f.cmd_count.to_string().yellow()
+    );
+    if c.interrupted {
+        println!("  {}", "⚠  session was interrupted (gap ≥ 5 min)".truecolor(255, 165, 0));
+    }
+    println!();
+
+    // Feature summary
+    println!("{}", "Features:".bold());
+    println!(
+        "  {:<16} {}",
+        "cmd_count".dimmed(),
+        f.cmd_count.to_string().yellow()
+    );
+    println!(
+        "  {:<16} {}",
+        "failure_rate".dimmed(),
+        format!("{:.1}%", f.failure_rate * 100.0).yellow()
+    );
+    let gap_str = if f.mean_gap_ms > 0.0 { fmt_gap(f.mean_gap_ms as i64) } else { "-".to_string() };
+    println!(
+        "  {:<16} {}  (max: {})",
+        "mean_gap".dimmed(),
+        gap_str.yellow(),
+        fmt_gap(f.max_gap_ms).dimmed()
+    );
+    let ent_str = if f.tool_entropy > 0.0 { format!("{:.3}", f.tool_entropy) } else { "-".to_string() };
+    println!("  {:<16} {}", "tool_entropy".dimmed(), ent_str.yellow());
+    println!();
+
+    // Decision path — mirror the classify() rule order
+    println!("{}", "Decision path:".bold());
+
+    // Gate 1: unknown check
+    let gate1_pass = f.cmd_count >= 3;
+    println!(
+        "  {} cmd_count ≥ 3?           {}  →  {}",
+        if gate1_pass { "✓".green() } else { "✗".red() },
+        format!("{} ≥ 3", f.cmd_count).dimmed(),
+        if gate1_pass { "continue".dimmed() } else { "UNKNOWN  ◀".red().bold() }
+    );
+    if !gate1_pass {
+        println!();
+        println!("  {}", format!("Classification: UNKNOWN  (too few commands)").bold());
+        return;
+    }
+
+    // Gate 2: debugging
+    let gate2_fire = f.failure_rate > 0.35;
+    println!(
+        "  {} failure_rate > 35%?       {}  →  {}",
+        if gate2_fire { "✓".green() } else { "✗".dimmed() },
+        format!("{:.1}% > 35%", f.failure_rate * 100.0).dimmed(),
+        if gate2_fire { "DEBUGGING  ◀".red().bold() } else { "skip".dimmed() }
+    );
+    if gate2_fire {
+        println!();
+        println!("  {}", "Classification: DEBUGGING".bold().red());
+        return;
+    }
+
+    // Gate 3: burst
+    let gap_ok = f.mean_gap_ms > 0.0 && f.mean_gap_ms < 2_000.0;
+    let cnt_ok  = f.cmd_count >= 5;
+    let gate3_fire = gap_ok && cnt_ok;
+    println!(
+        "  {} gap < 2s AND cmds ≥ 5?   {}  AND  {}  →  {}",
+        if gate3_fire { "✓".green() } else { "✗".dimmed() },
+        if f.mean_gap_ms > 0.0 {
+            format!("{} < 2s {}", fmt_gap(f.mean_gap_ms as i64), if gap_ok { "✓" } else { "✗" }).dimmed()
+        } else {
+            "no gap data ✗".dimmed()
+        },
+        format!("{} ≥ 5 {}", f.cmd_count, if cnt_ok { "✓" } else { "✗" }).dimmed(),
+        if gate3_fire { "BURST  ◀".cyan().bold() } else { "skip".dimmed() }
+    );
+    if gate3_fire {
+        println!();
+        println!("  {}", "Classification: BURST".bold().cyan());
+        return;
+    }
+
+    // Gate 4: focused
+    let gate4_fire = f.tool_entropy > 0.0 && f.tool_entropy < 0.45;
+    println!(
+        "  {} entropy > 0 AND < 0.45?  {}  →  {}",
+        if gate4_fire { "✓".green() } else { "✗".dimmed() },
+        format!("{:.3} < 0.45", f.tool_entropy).dimmed(),
+        if gate4_fire { "FOCUSED  ◀".green().bold() } else { "skip".dimmed() }
+    );
+    if gate4_fire {
+        println!();
+        println!("  {}", "Classification: FOCUSED".bold().green());
+        return;
+    }
+
+    // Gate 5: exploratory
+    let gate5_fire = f.tool_entropy >= 0.45;
+    println!(
+        "  {} entropy ≥ 0.45?           {}  →  {}",
+        if gate5_fire { "✓".green() } else { "✗".dimmed() },
+        format!("{:.3} ≥ 0.45", f.tool_entropy).dimmed(),
+        if gate5_fire { "EXPLORATORY  ◀".yellow().bold() } else { "skip".dimmed() }
+    );
+
+    println!();
+    let archetype_str = match &c.archetype {
+        Archetype::Unknown     => "UNKNOWN (no gap data, no pipeline steps)".dimmed().to_string(),
+        Archetype::Burst       => "BURST".cyan().bold().to_string(),
+        Archetype::Debugging   => "DEBUGGING".red().bold().to_string(),
+        Archetype::Focused     => "FOCUSED".green().bold().to_string(),
+        Archetype::Exploratory => "EXPLORATORY".yellow().bold().to_string(),
+    };
+    println!("  Classification: {}", archetype_str);
 }
 
 /// Taint analysis: credential flow through pipelines.

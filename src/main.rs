@@ -193,6 +193,9 @@ enum SessionCmd {
     Archetype {
         #[arg(short, long, default_value_t = 30)]
         limit: usize,
+        /// Explain classification for a specific session (ID or prefix)
+        #[arg(long)]
+        explain: Option<String>,
     },
 }
 
@@ -311,33 +314,65 @@ fn main() -> Result<()> {
                     let chains = db::failure_chains(&conn, limit)?;
                     display::print_failure_chains(&chains);
                 }
-                SessionCmd::Archetype { limit } => {
-                    let raw = db::session_raw_stats(&conn, limit)?;
-                    let sids: Vec<&str> = raw.iter().map(|s| s.session_id.as_str()).collect();
-                    let tool_map = db::session_tool_freqs(&conn, &sids)?;
+                SessionCmd::Archetype { limit, explain } => {
+                    if let Some(sid_prefix) = explain {
+                        // Single-session explain mode
+                        let raw = db::session_raw_stats_one(&conn, &sid_prefix)?;
+                        match raw {
+                            None => {
+                                eprintln!("No session found matching prefix '{}'.", sid_prefix);
+                                std::process::exit(1);
+                            }
+                            Some(s) => {
+                                let sids = [s.session_id.as_str()];
+                                let tool_map = db::session_tool_freqs(&conn, &sids)?;
+                                let freqs = tool_map.get(&s.session_id).cloned().unwrap_or_default();
+                                let entropy = archetype::tool_entropy(&freqs);
+                                let cv = archetype::gap_cv(s.gap_variance, s.mean_gap_ms);
+                                let features = archetype::SessionFeatures {
+                                    session_id:   s.session_id,
+                                    start_unix:   s.start_unix,
+                                    shell:        s.shell,
+                                    cmd_count:    s.cmd_count,
+                                    failure_rate: s.failure_rate,
+                                    mean_gap_ms:  s.mean_gap_ms,
+                                    max_gap_ms:   s.max_gap_ms,
+                                    gap_cv:       cv,
+                                    tool_entropy: entropy,
+                                };
+                                let classification = archetype::classify(&features);
+                                display::print_archetype_explain(&features, &classification);
+                            }
+                        }
+                    } else {
+                        // Table mode — all recent sessions
+                        let raw = db::session_raw_stats(&conn, limit)?;
+                        let sids: Vec<&str> = raw.iter().map(|s| s.session_id.as_str()).collect();
+                        let tool_map = db::session_tool_freqs(&conn, &sids)?;
 
-                    let pairs: Vec<_> = raw.into_iter().map(|s| {
-                        let freqs = tool_map.get(&s.session_id)
-                            .cloned()
-                            .unwrap_or_default();
-                        let entropy = archetype::tool_entropy(&freqs);
-                        let cv = archetype::gap_cv(s.gap_variance, s.mean_gap_ms);
-                        let features = archetype::SessionFeatures {
-                            session_id:   s.session_id,
-                            start_unix:   s.start_unix,
-                            shell:        s.shell,
-                            cmd_count:    s.cmd_count,
-                            failure_rate: s.failure_rate,
-                            mean_gap_ms:  s.mean_gap_ms,
-                            max_gap_ms:   s.max_gap_ms,
-                            gap_cv:       cv,
-                            tool_entropy: entropy,
-                        };
-                        let classification = archetype::classify(&features);
-                        (features, classification)
-                    }).collect();
+                        let pairs: Vec<_> = raw.into_iter().map(|s| {
+                            let freqs = tool_map.get(&s.session_id)
+                                .cloned()
+                                .unwrap_or_default();
+                            let entropy = archetype::tool_entropy(&freqs);
+                            let cv = archetype::gap_cv(s.gap_variance, s.mean_gap_ms);
+                            let features = archetype::SessionFeatures {
+                                session_id:   s.session_id,
+                                start_unix:   s.start_unix,
+                                shell:        s.shell,
+                                cmd_count:    s.cmd_count,
+                                failure_rate: s.failure_rate,
+                                mean_gap_ms:  s.mean_gap_ms,
+                                max_gap_ms:   s.max_gap_ms,
+                                gap_cv:       cv,
+                                tool_entropy: entropy,
+                            };
+                            let classification = archetype::classify(&features);
+                            (features, classification)
+                        }).collect();
 
-                    display::print_archetypes(&pairs);
+                        display::print_archetypes(&pairs);
+                    }
                 }
             }
         }

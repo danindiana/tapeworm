@@ -347,6 +347,45 @@ pub fn session_tool_freqs(
     Ok(out)
 }
 
+/// Fetch per-session stats for a single session identified by ID prefix.
+/// Returns None if no matching session is found.
+pub fn session_raw_stats_one(conn: &Connection, session_prefix: &str) -> Result<Option<SessionRawStats>> {
+    let pattern = format!("{}%", session_prefix);
+    let mut stmt = conn.prepare(
+        "SELECT
+             session_id,
+             MIN(timestamp_unix) AS start_unix,
+             MAX(shell)          AS shell,
+             COUNT(*)            AS cmd_count,
+             CAST(SUM(CASE WHEN exit_code != 0 THEN 1 ELSE 0 END) AS REAL)
+                 / COUNT(*)                                       AS failure_rate,
+             COALESCE(AVG(CASE WHEN gap_ms > 0
+                               THEN CAST(gap_ms AS REAL) END), 0.0) AS mean_gap_ms,
+             MAX(gap_ms)                                          AS max_gap_ms,
+             COALESCE(
+                 AVG(CAST(gap_ms AS REAL) * CAST(gap_ms AS REAL))
+                 - AVG(CAST(gap_ms AS REAL)) * AVG(CAST(gap_ms AS REAL)),
+                 0.0)                                             AS gap_variance
+         FROM commands
+         WHERE session_id LIKE ?1 AND session_id != ''
+         GROUP BY session_id
+         LIMIT 1",
+    )?;
+    let result = stmt.query_map(params![pattern], |row| {
+        Ok(SessionRawStats {
+            session_id:   row.get(0)?,
+            start_unix:   row.get(1)?,
+            shell:        row.get(2)?,
+            cmd_count:    row.get(3)?,
+            failure_rate: row.get(4)?,
+            mean_gap_ms:  row.get(5)?,
+            max_gap_ms:   row.get(6)?,
+            gap_variance: row.get(7)?,
+        })
+    })?.next().transpose()?;
+    Ok(result)
+}
+
 pub fn top_commands(conn: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT command, COUNT(*) as cnt

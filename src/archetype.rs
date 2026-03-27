@@ -127,6 +127,66 @@ pub fn gap_cv(variance: f64, mean: f64) -> f64 {
     }
 }
 
+/// Population baseline statistics for archetype features across a corpus of sessions.
+/// Used to detect sessions that are statistical outliers (|value − mean| > 2σ).
+pub struct BaselineStats {
+    pub failure_mean: f64,
+    pub failure_sd:   f64,
+    pub gap_mean:     f64,  // 0.0 when <3 sessions have gap data
+    pub gap_sd:       f64,
+    pub entropy_mean: f64,  // 0.0 when <3 sessions have entropy data
+    pub entropy_sd:   f64,
+}
+
+impl BaselineStats {
+    /// Returns Some(true) if failure_rate is >2σ from the mean.
+    pub fn failure_outlier(&self, v: f64) -> bool {
+        self.failure_sd > 0.0 && (v - self.failure_mean).abs() > 2.0 * self.failure_sd
+    }
+    /// Returns true if mean_gap_ms is >2σ from the mean (only when v > 0 and sd > 0).
+    pub fn gap_outlier(&self, v: f64) -> bool {
+        self.gap_sd > 0.0 && v > 0.0 && (v - self.gap_mean).abs() > 2.0 * self.gap_sd
+    }
+    /// Returns true if tool_entropy is >2σ from the mean (only when v > 0 and sd > 0).
+    pub fn entropy_outlier(&self, v: f64) -> bool {
+        self.entropy_sd > 0.0 && v > 0.0 && (v - self.entropy_mean).abs() > 2.0 * self.entropy_sd
+    }
+}
+
+/// Compute population baseline from a slice of classified sessions.
+/// Returns None when fewer than 5 sessions are present (corpus too thin for z-scores).
+pub fn compute_baseline(pairs: &[(SessionFeatures, Classification)]) -> Option<BaselineStats> {
+    if pairs.len() < 5 {
+        return None;
+    }
+
+    fn mean_sd(vals: &[f64]) -> (f64, f64) {
+        if vals.is_empty() {
+            return (0.0, 0.0);
+        }
+        let n = vals.len() as f64;
+        let mean = vals.iter().sum::<f64>() / n;
+        let var = vals.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        (mean, var.sqrt())
+    }
+
+    let failure_vals: Vec<f64> = pairs.iter().map(|(f, _)| f.failure_rate).collect();
+    let gap_vals: Vec<f64> = pairs.iter()
+        .filter(|(f, _)| f.mean_gap_ms > 0.0)
+        .map(|(f, _)| f.mean_gap_ms)
+        .collect();
+    let entropy_vals: Vec<f64> = pairs.iter()
+        .filter(|(f, _)| f.tool_entropy > 0.0)
+        .map(|(f, _)| f.tool_entropy)
+        .collect();
+
+    let (failure_mean, failure_sd) = mean_sd(&failure_vals);
+    let (gap_mean, gap_sd) = if gap_vals.len() >= 3 { mean_sd(&gap_vals) } else { (0.0, 0.0) };
+    let (entropy_mean, entropy_sd) = if entropy_vals.len() >= 3 { mean_sd(&entropy_vals) } else { (0.0, 0.0) };
+
+    Some(BaselineStats { failure_mean, failure_sd, gap_mean, gap_sd, entropy_mean, entropy_sd })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
