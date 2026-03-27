@@ -7,6 +7,7 @@ mod record;
 mod redact;
 mod semantic;
 mod shell;
+mod taint;
 mod timefilter;
 
 use anyhow::{Context, Result};
@@ -149,6 +150,13 @@ enum Commands {
         /// Embedding model (must match what was used during embed)
         #[arg(long)]
         model: Option<String>,
+    },
+
+    /// Forward taint analysis: trace credential flow through recorded pipelines
+    Taint {
+        /// Also show clean (untainted) steps in the output
+        #[arg(long)]
+        all: bool,
     },
 
     /// Show active configuration path and values
@@ -374,6 +382,13 @@ fn main() -> Result<()> {
                 ids.iter().position(|id| Some(*id) == r.id).unwrap_or(usize::MAX)
             });
             display::print_semantic_results(&records, &matches);
+        }
+
+        Commands::Taint { all } => {
+            let conn = db::open()?;
+            let rows = db::tainted_step_rows(&conn)?;
+            let pipelines = taint::build_tainted_pipelines(rows);
+            display::print_taint(&pipelines, all);
         }
 
         Commands::Config => {

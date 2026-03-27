@@ -1,5 +1,6 @@
 use crate::db::{SessionSummary, ToolEdge};
 use crate::record::CommandRecord;
+use crate::taint::{TaintLabel, TaintedPipeline};
 use chrono::{Local, TimeZone};
 use colored::Colorize;
 use comfy_table::{Attribute, Cell, Color, Table};
@@ -394,6 +395,109 @@ pub fn print_pipes(patterns: &[(String, i64)], bigrams: &[(String, String, i64)]
             ]);
         }
         println!("{tbl}");
+    }
+}
+
+/// Taint analysis: credential flow through pipelines.
+///
+/// Each tainted pipeline is rendered as a two-level block:
+///   header — timestamp + full redacted command
+///   step rows — index, tool, label, raw step text
+///
+/// Labels are colour-coded:
+///   TAINT-SOURCE / CREDENTIAL-USE — yellow  (secret present)
+///   PROPAGATED                    — dim     (data flows through)
+///   NETWORK-SINK / FILE-SINK /
+///   PROCESS-SINK                  — red     (secret reaches output ⚠)
+///   DISCARDED                     — green   (taint terminated safely)
+///   CLEAN                         — dim grey (not shown unless --all)
+pub fn print_taint(pipelines: &[TaintedPipeline], show_clean: bool) {
+    if pipelines.is_empty() {
+        println!("{}", "=== taint analysis: credential flow ===".bold().cyan());
+        println!("{}", "No commands with credential exposure found in corpus.".yellow());
+        println!(
+            "{}",
+            "  (Commands with --token, --password, API_KEY=… etc. will appear here once recorded)"
+                .dimmed()
+        );
+        return;
+    }
+
+    let warning_count: usize = pipelines.iter()
+        .flat_map(|p| &p.steps)
+        .filter(|s| s.label.is_warning())
+        .count();
+
+    println!("{}", "=== taint analysis: credential flow ===".bold().cyan());
+    println!(
+        "{} pipelines  {}",
+        pipelines.len().to_string().yellow(),
+        if warning_count > 0 {
+            format!("{} ⚠  sinks reached", warning_count).red().to_string()
+        } else {
+            "no sinks reached".dimmed().to_string()
+        }
+    );
+    println!();
+
+    for pipeline in pipelines {
+        // Trim ISO timestamp
+        let ts = if pipeline.timestamp_iso.len() >= 19 {
+            &pipeline.timestamp_iso[..19]
+        } else {
+            &pipeline.timestamp_iso
+        };
+
+        // Header: timestamp + command
+        println!(
+            "{} {}",
+            format!("[{}]", ts).dimmed(),
+            pipeline.command_text.bold()
+        );
+
+        for step in &pipeline.steps {
+            if !show_clean && step.label == TaintLabel::Clean {
+                continue;
+            }
+
+            let label_str = step.label.as_str();
+            let label_cell = match &step.label {
+                TaintLabel::Clean        => label_str.dimmed().to_string(),
+                TaintLabel::TaintSource  => label_str.yellow().bold().to_string(),
+                TaintLabel::CredentialUse => label_str.yellow().to_string(),
+                TaintLabel::Propagated   => label_str.dimmed().to_string(),
+                TaintLabel::NetworkSink  => format!("{} ⚠", label_str).red().bold().to_string(),
+                TaintLabel::FileSink     => format!("{} ⚠", label_str).red().to_string(),
+                TaintLabel::ProcessSink  => format!("{} ⚠", label_str).red().to_string(),
+                TaintLabel::Discarded    => label_str.green().dimmed().to_string(),
+            };
+
+            // Truncate raw if long
+            let raw_display = if step.raw.len() > 60 {
+                format!("{}…", &step.raw[..59])
+            } else {
+                step.raw.clone()
+            };
+
+            // Special note for tee: it also writes to file
+            let note = if step.tool == "tee"
+                && matches!(step.label, TaintLabel::Propagated | TaintLabel::TaintSource)
+            {
+                "  [tee: also writes to file]".yellow().dimmed().to_string()
+            } else {
+                String::new()
+            };
+
+            println!(
+                "  {:>2}  {:<10}  [{:<16}]  {}{}",
+                step.step_index,
+                step.tool.cyan().to_string(),
+                label_cell,
+                raw_display.dimmed(),
+                note
+            );
+        }
+        println!();
     }
 }
 

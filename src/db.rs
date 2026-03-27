@@ -511,6 +511,36 @@ pub fn tool_transitions(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Fetch all pipeline steps for every command that contains at least one
+/// `<REDACTED>` token.  Rows are ordered by `(command_id, step_index)` so the
+/// caller can group them with a simple linear scan.
+pub fn tainted_step_rows(conn: &Connection) -> Result<Vec<crate::taint::StepRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.command, c.timestamp_iso,
+                ps.step_index, ps.tool, ps.raw, ps.connector
+         FROM commands c
+         JOIN pipeline_steps ps ON ps.command_id = c.id
+         WHERE c.id IN (
+             SELECT DISTINCT command_id
+             FROM pipeline_steps
+             WHERE raw LIKE '%<REDACTED>%'
+         )
+         ORDER BY c.id, ps.step_index",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(crate::taint::StepRow {
+            command_id:    row.get(0)?,
+            command_text:  row.get(1)?,
+            timestamp_iso: row.get(2)?,
+            step_index:    row.get(3)?,
+            tool:          row.get(4)?,
+            raw:           row.get(5)?,
+            connector:     row.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 fn rows_to_records(
     stmt: &mut rusqlite::Statement,
     params: impl rusqlite::Params,
