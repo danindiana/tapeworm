@@ -1,4 +1,4 @@
-use crate::archetype::{compute_baseline, Archetype, Classification, SessionFeatures};
+use crate::archetype::{Archetype, BaselineStats, Classification, SessionFeatures};
 use crate::db::{SessionSummary, ToolEdge};
 use crate::record::CommandRecord;
 use crate::taint::{TaintLabel, TaintedPipeline};
@@ -463,14 +463,12 @@ pub fn print_pipes(patterns: &[(String, i64)], bigrams: &[(String, String, i64)]
 }
 
 /// Session archetype classification table.
-pub fn print_archetypes(pairs: &[(SessionFeatures, Classification)]) {
+pub fn print_archetypes(pairs: &[(SessionFeatures, Classification)], baseline: Option<&BaselineStats>) {
     if pairs.is_empty() {
         println!("{}", "=== session archetypes ===".bold().cyan());
         println!("{}", "No sessions recorded yet.".yellow());
         return;
     }
-
-    let baseline = compute_baseline(pairs);
 
     println!("{}", "=== session archetypes ===".bold().cyan());
     let mut tbl = Table::new();
@@ -526,7 +524,7 @@ pub fn print_archetypes(pairs: &[(SessionFeatures, Classification)]) {
         if c.interrupted {
             flag_parts.push("⚠ interrupted".to_string());
         }
-        if let Some(ref b) = baseline {
+        if let Some(b) = baseline {
             if b.failure_outlier(f.failure_rate) {
                 flag_parts.push(if f.failure_rate > b.failure_mean {
                     "↑fail".to_string()
@@ -708,6 +706,40 @@ pub fn print_archetype_explain(f: &SessionFeatures, c: &Classification) {
         Archetype::Exploratory => "EXPLORATORY".yellow().bold().to_string(),
     };
     println!("  Classification: {}", archetype_str);
+}
+
+/// Compact one-line archetype summary for `session show` footer.
+pub fn print_session_archetype_summary(f: &SessionFeatures, c: &Classification) {
+    let archetype_str = match &c.archetype {
+        Archetype::Unknown     => "unknown".dimmed().to_string(),
+        Archetype::Burst       => "burst".cyan().bold().to_string(),
+        Archetype::Debugging   => "debugging".red().bold().to_string(),
+        Archetype::Focused     => "focused".green().bold().to_string(),
+        Archetype::Exploratory => "exploratory".yellow().bold().to_string(),
+    };
+    let fail_pct = format!("{:.0}%", f.failure_rate * 100.0);
+    let fail_str = if f.failure_rate > 0.35 {
+        fail_pct.red().to_string()
+    } else if f.failure_rate > 0.1 {
+        fail_pct.yellow().to_string()
+    } else {
+        fail_pct.green().to_string()
+    };
+    let gap_str = if f.mean_gap_ms > 0.0 {
+        fmt_gap(f.mean_gap_ms as i64).dimmed().to_string()
+    } else {
+        "-".dimmed().to_string()
+    };
+    let ent_str = if f.tool_entropy > 0.0 {
+        format!("{:.2}", f.tool_entropy).dimmed().to_string()
+    } else {
+        "-".dimmed().to_string()
+    };
+    let interrupted = if c.interrupted { "  ⚠ interrupted".truecolor(255, 165, 0).to_string() } else { String::new() };
+    println!(
+        "  archetype {}   fail {}   gap̄ {}   entropy {}{}",
+        archetype_str, fail_str, gap_str, ent_str, interrupted
+    );
 }
 
 /// Taint analysis: credential flow through pipelines.

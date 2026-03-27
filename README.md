@@ -317,7 +317,7 @@ tapeworm session archetype -l 50
 tapeworm session archetype --explain a3f8c2d1
 ```
 
-When ≥ 5 sessions are present the table also computes a population baseline (mean ± σ) for each feature. Sessions more than 2σ from the mean receive deviation indicators in the flags column: `↑fail` (high failure rate), `↓gap` (unusually fast), `↑ent` (high entropy), and so on. A legend line notes when baseline is active.
+When ≥ 5 sessions are present the table also computes a population baseline (mean ± σ) for each feature. Up to 500 sessions are sampled for the baseline calculation, keeping z-scores stable regardless of the display `--limit`. Sessions more than 2σ from the mean receive deviation indicators in the flags column: `↑fail` (high failure rate), `↓gap` (unusually fast), `↑ent` (high entropy), and so on. A legend line notes when baseline is active.
 
 The `--explain` view shows each classification gate with its feature value, the threshold, and whether that gate fired:
 
@@ -364,6 +364,12 @@ The shell hook records `gap_ms` — time elapsed from when the previous command 
 ```
 
 Gap data accumulates starting from the first shell opened after installing the updated hook. Pre-existing records show `0`.
+
+`tapeworm session show` also prints a compact archetype summary line at the bottom:
+
+```
+  archetype focused   fail 0%   gap̄ 4s   entropy 0.31
+```
 
 ---
 

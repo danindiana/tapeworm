@@ -340,6 +340,27 @@ fn main() -> Result<()> {
                 SessionCmd::Show { session_id, limit } => {
                     let records = db::recent_in_session(&conn, &session_id, limit)?;
                     display::print_session_timeline(&session_id, &records);
+                    // Archetype footer
+                    if let Some(raw) = db::session_raw_stats_one(&conn, &session_id)? {
+                        let sids = [raw.session_id.as_str()];
+                        let tool_map = db::session_tool_freqs(&conn, &sids)?;
+                        let freqs = tool_map.get(&raw.session_id).cloned().unwrap_or_default();
+                        let entropy = archetype::tool_entropy(&freqs);
+                        let cv = archetype::gap_cv(raw.gap_variance, raw.mean_gap_ms);
+                        let features = archetype::SessionFeatures {
+                            session_id:   raw.session_id,
+                            start_unix:   raw.start_unix,
+                            shell:        raw.shell,
+                            cmd_count:    raw.cmd_count,
+                            failure_rate: raw.failure_rate,
+                            mean_gap_ms:  raw.mean_gap_ms,
+                            max_gap_ms:   raw.max_gap_ms,
+                            gap_cv:       cv,
+                            tool_entropy: entropy,
+                        };
+                        let classification = archetype::classify(&features);
+                        display::print_session_archetype_summary(&features, &classification);
+                    }
                 }
                 SessionCmd::Failures { limit } => {
                     let chains = db::failure_chains(&conn, limit)?;
@@ -376,12 +397,13 @@ fn main() -> Result<()> {
                             }
                         }
                     } else {
-                        // Table mode — all recent sessions
-                        let raw = db::session_raw_stats(&conn, limit)?;
-                        let sids: Vec<&str> = raw.iter().map(|s| s.session_id.as_str()).collect();
-                        let tool_map = db::session_tool_freqs(&conn, &sids)?;
+                        // Table mode — fetch a larger corpus for stable baseline, slice for display
+                        const BASELINE_CAP: usize = 500;
+                        let all_raw = db::session_raw_stats(&conn, BASELINE_CAP)?;
+                        let all_sids: Vec<&str> = all_raw.iter().map(|s| s.session_id.as_str()).collect();
+                        let tool_map = db::session_tool_freqs(&conn, &all_sids)?;
 
-                        let pairs: Vec<_> = raw.into_iter().map(|s| {
+                        let all_pairs: Vec<_> = all_raw.into_iter().map(|s| {
                             let freqs = tool_map.get(&s.session_id)
                                 .cloned()
                                 .unwrap_or_default();
@@ -402,7 +424,9 @@ fn main() -> Result<()> {
                             (features, classification)
                         }).collect();
 
-                        display::print_archetypes(&pairs);
+                        let baseline = archetype::compute_baseline(&all_pairs);
+                        let display_pairs = &all_pairs[..limit.min(all_pairs.len())];
+                        display::print_archetypes(display_pairs, baseline.as_ref());
                     }
                 }
             }
