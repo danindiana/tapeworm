@@ -18,6 +18,11 @@ Unlike `~/.zsh_history` or `~/.bash_history`, tapeworm gives you a queryable, ex
 - Non-blocking: recording fires as a disowned background subprocess (`&!`) — zero perceptible prompt latency
 - Composes cleanly with oh-my-zsh, powerlevel10k, and other zsh frameworks via `add-zsh-hook`
 - **Pipeline composition analysis**: parses every recorded command into steps, extracts tool names, and stores them in a `pipeline_steps` table for frequency and bigram analysis
+- **Ollama semantic search**: embed commands with a local LLM and query your history in natural language
+- **Session intelligence**: per-shell UUID sessions, timeline reconstruction, failure chain analysis
+- **Time filtering**: `--since 2h`, `--since 1d`, `--today` window filtering on `log`
+- **TOML config**: persistent configuration for Ollama URL, model, auto-embed, and display defaults
+- **MCP integration**: Claude Code MCP servers for direct AI access to Ollama and the tapeworm DB
 
 ---
 
@@ -58,15 +63,21 @@ tapeworm <COMMAND>
 
 | Command | Description |
 |---------|-------------|
-| `init [--shell zsh\|bash]` | Print shell hook snippet for eval |
+| `init [--shell zsh\|bash] [--auto-embed]` | Print shell hook snippet for eval |
 | `session-id` | Generate a new UUID4 (used internally by hooks) |
-| `record --cmd CMD --cwd DIR --exit N --duration N --session S` | Write one record (called by hooks) |
-| `log [-l LIMIT]` | Display recent command history (default: 50) |
+| `record --cmd CMD --cwd DIR --exit N --duration N --session S [--embed]` | Write one record (called by hooks) |
+| `log [-l LIMIT] [--since DURATION] [--today] [--session ID]` | Display recent command history |
 | `search PATTERN [-l LIMIT]` | Substring search across command history |
 | `export [--format json\|csv]` | Dump all records to stdout |
 | `stats` | Top commands + hourly activity chart |
 | `tools [-l LIMIT]` | Top tools ranked by frequency across all pipeline steps |
 | `pipes [-l LIMIT]` | Top pipeline patterns and most common pipe bigrams |
+| `session list [-l LIMIT]` | List recent sessions with summary stats |
+| `session show SESSION_ID` | Full command timeline for a session |
+| `session failures [-l LIMIT]` | Commands that ran immediately after a failure |
+| `embed [--model MODEL] [--url URL] [-l LIMIT]` | Generate Ollama embeddings for unprocessed commands |
+| `semantic QUERY [-l LIMIT] [--model MODEL] [--url URL]` | Natural language similarity search |
+| `config` | Show active config path and values |
 | `db-path` | Print path to the SQLite database file |
 
 ### Examples
@@ -74,6 +85,19 @@ tapeworm <COMMAND>
 ```bash
 # View last 100 commands
 tapeworm log -l 100
+
+# Filter to commands from the last 2 hours
+tapeworm log --since 2h
+
+# Show everything since midnight today
+tapeworm log --today
+
+# Show a specific session's full timeline
+tapeworm session list
+tapeworm session show <session-prefix>
+
+# What did I run right after something failed?
+tapeworm session failures
 
 # Find all git commands
 tapeworm search git
@@ -89,7 +113,31 @@ tapeworm export --format json > history.json
 
 # Usage statistics
 tapeworm stats
+
+# Natural language search (requires embeddings)
+tapeworm semantic "debug memory leak"
+tapeworm semantic "GPU memory status"
 ```
+
+---
+
+## Configuration
+
+tapeworm looks for a TOML config file at `~/.config/tapeworm/config.toml`. Running `tapeworm config` creates the default if it doesn't exist.
+
+```toml
+[ollama]
+url        = "http://localhost:11434"
+model      = "nomic-embed-text"
+auto_embed = false   # set true to embed every command inline at record time
+
+[display]
+log_limit = 50       # default number of rows for `tapeworm log`
+```
+
+### Auto-embedding
+
+With `auto_embed = true` (or `tapeworm init --auto-embed`), every `tapeworm record` call also embeds the command via Ollama inline in the background hook. If Ollama is unavailable, it silently skips — the hook never fails.
 
 ---
 
@@ -126,6 +174,14 @@ CREATE TABLE pipeline_steps (
     tool         TEXT    NOT NULL,   -- extracted tool name (argv[0], basename, wrappers stripped)
     raw          TEXT    NOT NULL,   -- full text of this pipeline step
     connector    TEXT    NOT NULL DEFAULT ''  -- |, &&, ||, ; or "" for last step
+);
+
+-- Ollama embeddings for semantic search.
+CREATE TABLE command_embeddings (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    command_id INTEGER NOT NULL UNIQUE REFERENCES commands(id) ON DELETE CASCADE,
+    model      TEXT    NOT NULL,
+    embedding  BLOB    NOT NULL   -- packed little-endian f32 array
 );
 ```
 
@@ -215,6 +271,25 @@ For very large histories (100k+ commands), replace the in-memory cosine search w
 
 ---
 
+## Session intelligence
+
+Every shell process generates a fresh UUID4 session ID via `tapeworm session-id`, stored in `$TAPEWORM_SESSION` and written with each record. This enables three views:
+
+```bash
+# List recent sessions — ID, start time, wall duration, command count, failure count, shell
+tapeworm session list
+
+# Full timeline for one session (use 8-char prefix from list output)
+tapeworm session show a3f8c2d1
+
+# Failure chains: what did you run immediately after something broke?
+tapeworm session failures
+```
+
+The failure chain view shows `failed_command → next_command` pairs, useful for reconstructing debugging sequences.
+
+---
+
 ## Pipeline composition analysis
 
 Every recorded command is parsed into pipeline steps at record time and stored in `pipeline_steps`. This makes the history corpus a structured execution trace, not just a string log.
@@ -285,6 +360,46 @@ GROUP BY b.tool ORDER BY cnt DESC;
 
 ---
 
+## MCP integration (Claude Code)
+
+tapeworm ships with configuration for two Claude Code MCP servers, giving Claude direct tool access to Ollama and the tapeworm history database.
+
+### Setup
+
+Both servers are scoped to the tapeworm project directory via `.claude.json`. After cloning, add them:
+
+```bash
+# Ollama MCP — 14 tools: list models, generate, embed, pull, show info, ps, etc.
+claude mcp add ollama-rawveg \
+  --transport stdio \
+  --env "OLLAMA_HOST=http://localhost:11434" \
+  -- npx -y ollama-mcp
+
+# SQLite MCP — full read/write SQL access to the tapeworm history DB
+pip install mcp-server-sqlite
+claude mcp add sqlite-tapeworm \
+  --transport stdio \
+  -- /path/to/venv/bin/mcp-server-sqlite \
+  --db-path ~/.local/share/tapeworm/history.db
+```
+
+Verify both connect:
+```bash
+claude mcp list
+# ollama-rawveg:   npx -y ollama-mcp                    ✓ Connected
+# sqlite-tapeworm: mcp-server-sqlite --db-path ...       ✓ Connected
+```
+
+### What this enables
+
+With these MCPs active, Claude Code can:
+- Query the tapeworm DB directly in natural language ("what commands failed today?")
+- Generate embeddings for semantic search without leaving Claude Code
+- Pull or inspect Ollama models inline during a session
+- Cross-reference your shell history with code you're actively editing
+
+---
+
 ## Dependencies
 
 | Crate | Purpose |
@@ -300,6 +415,8 @@ GROUP BY b.tool ORDER BY cnt DESC;
 | `dirs` v5 | XDG data directory resolution |
 | `anyhow` v1 | Ergonomic error propagation |
 | `hostname` v0.4 | Hostname resolution |
+| `reqwest` v0.12 (blocking) | Ollama HTTP client |
+| `toml` v0.8 | TOML config deserialization |
 
 `rusqlite` with `features = ["bundled"]` compiles SQLite statically — no system SQLite version dependency.
 
