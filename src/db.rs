@@ -67,6 +67,12 @@ fn migrate(conn: &Connection) -> Result<()> {
              embedding   BLOB    NOT NULL   -- packed little-endian f32 array
          );",
     )?;
+    // Additive migration: add gap_ms if it doesn't exist yet.
+    // SQLite has no ADD COLUMN IF NOT EXISTS; ignoring the error is idiomatic.
+    let _ = conn.execute(
+        "ALTER TABLE commands ADD COLUMN gap_ms INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(())
 }
 
@@ -74,8 +80,8 @@ pub fn insert(conn: &Connection, r: &CommandRecord) -> Result<i64> {
     conn.execute(
         "INSERT INTO commands
          (timestamp_unix, timestamp_iso, command, cwd, exit_code,
-          duration_ms, shell, user, hostname, session_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+          duration_ms, gap_ms, shell, user, hostname, session_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             r.timestamp_unix,
             r.timestamp_iso,
@@ -83,6 +89,7 @@ pub fn insert(conn: &Connection, r: &CommandRecord) -> Result<i64> {
             r.cwd,
             r.exit_code,
             r.duration_ms,
+            r.gap_ms,
             r.shell,
             r.user,
             r.hostname,
@@ -95,7 +102,7 @@ pub fn insert(conn: &Connection, r: &CommandRecord) -> Result<i64> {
 pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<CommandRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
-                exit_code, duration_ms, shell, user, hostname, session_id
+                exit_code, duration_ms, gap_ms, shell, user, hostname, session_id
          FROM commands
          ORDER BY timestamp_unix DESC
          LIMIT ?1",
@@ -106,7 +113,7 @@ pub fn recent(conn: &Connection, limit: usize) -> Result<Vec<CommandRecord>> {
 pub fn recent_since(conn: &Connection, since_unix: i64, limit: usize) -> Result<Vec<CommandRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
-                exit_code, duration_ms, shell, user, hostname, session_id
+                exit_code, duration_ms, gap_ms, shell, user, hostname, session_id
          FROM commands
          WHERE timestamp_unix >= ?1
          ORDER BY timestamp_unix DESC
@@ -120,7 +127,7 @@ pub fn recent_in_session(conn: &Connection, session_id: &str, limit: usize) -> R
     let pattern = format!("{}%", session_id);
     let mut stmt = conn.prepare(
         "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
-                exit_code, duration_ms, shell, user, hostname, session_id
+                exit_code, duration_ms, gap_ms, shell, user, hostname, session_id
          FROM commands
          WHERE session_id LIKE ?1
          ORDER BY timestamp_unix ASC
@@ -133,7 +140,7 @@ pub fn search(conn: &Connection, pattern: &str, limit: usize) -> Result<Vec<Comm
     let like = format!("%{}%", pattern);
     let mut stmt = conn.prepare(
         "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
-                exit_code, duration_ms, shell, user, hostname, session_id
+                exit_code, duration_ms, gap_ms, shell, user, hostname, session_id
          FROM commands
          WHERE command LIKE ?1
          ORDER BY timestamp_unix DESC
@@ -145,7 +152,7 @@ pub fn search(conn: &Connection, pattern: &str, limit: usize) -> Result<Vec<Comm
 pub fn all(conn: &Connection) -> Result<Vec<CommandRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
-                exit_code, duration_ms, shell, user, hostname, session_id
+                exit_code, duration_ms, gap_ms, shell, user, hostname, session_id
          FROM commands
          ORDER BY timestamp_unix ASC",
     )?;
@@ -198,9 +205,9 @@ pub fn failure_chains(conn: &Connection, limit: usize) -> Result<Vec<(CommandRec
     let mut stmt = conn.prepare(
         "SELECT
              f.id, f.timestamp_unix, f.timestamp_iso, f.command, f.cwd,
-             f.exit_code, f.duration_ms, f.shell, f.user, f.hostname, f.session_id,
+             f.exit_code, f.duration_ms, f.gap_ms, f.shell, f.user, f.hostname, f.session_id,
              r.id, r.timestamp_unix, r.timestamp_iso, r.command, r.cwd,
-             r.exit_code, r.duration_ms, r.shell, r.user, r.hostname, r.session_id
+             r.exit_code, r.duration_ms, r.gap_ms, r.shell, r.user, r.hostname, r.session_id
          FROM commands f
          JOIN commands r
            ON r.session_id = f.session_id
@@ -222,23 +229,25 @@ pub fn failure_chains(conn: &Connection, limit: usize) -> Result<Vec<(CommandRec
             cwd:            row.get(4)?,
             exit_code:      row.get(5)?,
             duration_ms:    row.get(6)?,
-            shell:          row.get(7)?,
-            user:           row.get(8)?,
-            hostname:       row.get(9)?,
-            session_id:     row.get(10)?,
+            gap_ms:         row.get(7)?,
+            shell:          row.get(8)?,
+            user:           row.get(9)?,
+            hostname:       row.get(10)?,
+            session_id:     row.get(11)?,
         };
         let recovery = CommandRecord {
-            id:             Some(row.get(11)?),
-            timestamp_unix: row.get(12)?,
-            timestamp_iso:  row.get(13)?,
-            command:        row.get(14)?,
-            cwd:            row.get(15)?,
-            exit_code:      row.get(16)?,
-            duration_ms:    row.get(17)?,
-            shell:          row.get(18)?,
-            user:           row.get(19)?,
-            hostname:       row.get(20)?,
-            session_id:     row.get(21)?,
+            id:             Some(row.get(12)?),
+            timestamp_unix: row.get(13)?,
+            timestamp_iso:  row.get(14)?,
+            command:        row.get(15)?,
+            cwd:            row.get(16)?,
+            exit_code:      row.get(17)?,
+            duration_ms:    row.get(18)?,
+            gap_ms:         row.get(19)?,
+            shell:          row.get(20)?,
+            user:           row.get(21)?,
+            hostname:       row.get(22)?,
+            session_id:     row.get(23)?,
         };
         Ok((failed, recovery))
     })?;
@@ -447,7 +456,7 @@ pub fn get_commands_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<Command
         .join(", ");
     let sql = format!(
         "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
-                exit_code, duration_ms, shell, user, hostname, session_id
+                exit_code, duration_ms, gap_ms, shell, user, hostname, session_id
          FROM commands WHERE id IN ({})",
         placeholders
     );
@@ -547,17 +556,18 @@ fn rows_to_records(
 ) -> Result<Vec<CommandRecord>> {
     let rows = stmt.query_map(params, |row| {
         Ok(CommandRecord {
-            id: Some(row.get(0)?),
+            id:             Some(row.get(0)?),
             timestamp_unix: row.get(1)?,
-            timestamp_iso: row.get(2)?,
-            command: row.get(3)?,
-            cwd: row.get(4)?,
-            exit_code: row.get(5)?,
-            duration_ms: row.get(6)?,
-            shell: row.get(7)?,
-            user: row.get(8)?,
-            hostname: row.get(9)?,
-            session_id: row.get(10)?,
+            timestamp_iso:  row.get(2)?,
+            command:        row.get(3)?,
+            cwd:            row.get(4)?,
+            exit_code:      row.get(5)?,
+            duration_ms:    row.get(6)?,
+            gap_ms:         row.get(7)?,
+            shell:          row.get(8)?,
+            user:           row.get(9)?,
+            hostname:       row.get(10)?,
+            session_id:     row.get(11)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)

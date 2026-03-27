@@ -51,6 +51,9 @@ enum Commands {
         exit: i64,
         #[arg(long, default_value_t = 0)]
         duration: i64,
+        /// Milliseconds since the previous command finished (idle + think time)
+        #[arg(long, default_value_t = 0)]
+        gap: i64,
         #[arg(long, default_value = "")]
         session: String,
         /// Also embed this command inline (silently skips if Ollama unavailable)
@@ -207,7 +210,7 @@ fn main() -> Result<()> {
             println!("{}", uuid::Uuid::new_v4());
         }
 
-        Commands::Record { cmd, cwd, exit, duration, session, embed: do_embed } => {
+        Commands::Record { cmd, cwd, exit, duration, gap, session, embed: do_embed } => {
             let shell_name = env::var("TAPEWORM_SHELL").unwrap_or_else(|_| {
                 env::var("SHELL")
                     .unwrap_or_default()
@@ -223,7 +226,7 @@ fn main() -> Result<()> {
 
             let cmd = redact::redact_command(&cmd);
             let r = CommandRecord::new(
-                cmd, cwd, exit, duration, shell_name, user, hostname, session,
+                cmd, cwd, exit, duration, gap, shell_name, user, hostname, session,
             );
             let conn = db::open()?;
             let command_id = db::insert(&conn, &r)?;
@@ -420,7 +423,7 @@ fn export_csv(records: &[CommandRecord]) -> Result<()> {
     let mut wtr = csv::Writer::from_writer(std::io::stdout());
     wtr.write_record([
         "id", "timestamp_unix", "timestamp_iso", "command", "cwd",
-        "exit_code", "duration_ms", "shell", "user", "hostname", "session_id",
+        "exit_code", "duration_ms", "gap_ms", "shell", "user", "hostname", "session_id",
     ])?;
     for r in records {
         wtr.write_record([
@@ -431,6 +434,7 @@ fn export_csv(records: &[CommandRecord]) -> Result<()> {
             r.cwd.clone(),
             r.exit_code.to_string(),
             r.duration_ms.to_string(),
+            r.gap_ms.to_string(),
             r.shell.clone(),
             r.user.clone(),
             r.hostname.clone(),

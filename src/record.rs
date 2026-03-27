@@ -10,6 +10,10 @@ pub struct CommandRecord {
     pub cwd: String,
     pub exit_code: i64,
     pub duration_ms: i64,
+    /// Milliseconds elapsed between the end of the previous command and the
+    /// start of this one (idle + think time).  0 for the first command in a
+    /// session or when the shell hook doesn't supply the value.
+    pub gap_ms: i64,
     pub shell: String,
     pub user: String,
     pub hostname: String,
@@ -22,6 +26,7 @@ impl CommandRecord {
         cwd: String,
         exit_code: i64,
         duration_ms: i64,
+        gap_ms: i64,
         shell: String,
         user: String,
         hostname: String,
@@ -36,6 +41,7 @@ impl CommandRecord {
             cwd,
             exit_code,
             duration_ms,
+            gap_ms,
             shell,
             user,
             hostname,

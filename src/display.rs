@@ -167,7 +167,8 @@ pub fn print_session_timeline(session_id: &str, records: &[CommandRecord]) {
         Cell::new("#").add_attribute(Attribute::Bold),
         Cell::new("Time").add_attribute(Attribute::Bold),
         Cell::new("Exit").add_attribute(Attribute::Bold),
-        Cell::new("ms").add_attribute(Attribute::Bold),
+        Cell::new("dur").add_attribute(Attribute::Bold),
+        Cell::new("gap").add_attribute(Attribute::Bold),
         Cell::new("Dir").add_attribute(Attribute::Bold),
         Cell::new("Command").add_attribute(Attribute::Bold),
     ]);
@@ -188,11 +189,22 @@ pub fn print_session_timeline(session_id: &str, records: &[CommandRecord]) {
             r.cwd.clone()
         };
         let ts = if r.timestamp_iso.len() >= 19 { &r.timestamp_iso[11..19] } else { &r.timestamp_iso };
+        // Colour gap by magnitude: >60s = yellow (long think), >300s = red (long idle)
+        let gap_cell = if r.gap_ms == 0 {
+            Cell::new("-").fg(Color::DarkGrey)
+        } else if r.gap_ms >= 300_000 {
+            Cell::new(fmt_gap(r.gap_ms)).fg(Color::Red)
+        } else if r.gap_ms >= 60_000 {
+            Cell::new(fmt_gap(r.gap_ms)).fg(Color::Yellow)
+        } else {
+            Cell::new(fmt_gap(r.gap_ms)).fg(Color::DarkGrey)
+        };
         tbl.add_row(vec![
             Cell::new((i + 1).to_string()),
             Cell::new(ts),
             exit_cell,
             Cell::new(r.duration_ms.to_string()),
+            gap_cell,
             Cell::new(cwd_display),
             Cell::new(cmd_display),
         ]);
@@ -242,6 +254,19 @@ pub fn print_failure_chains(pairs: &[(CommandRecord, CommandRecord)]) {
         ]);
     }
     println!("{tbl}");
+}
+
+/// Format a gap in milliseconds as a human-readable string: "4.2s", "2m3s".
+fn fmt_gap(ms: i64) -> String {
+    if ms < 1_000 {
+        format!("{}ms", ms)
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else if ms < 3_600_000 {
+        format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1000)
+    } else {
+        format!("{}h{}m", ms / 3_600_000, (ms % 3_600_000) / 60_000)
+    }
 }
 
 fn fmt_duration(secs: i64) -> String {

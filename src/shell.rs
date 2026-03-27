@@ -13,10 +13,18 @@ export TAPEWORM_SESSION="$(tapeworm session-id)"
 
 _tw_start=0
 _tw_cmd=""
+_tw_gap=0
+_tw_prev_end=0   # epoch ms when the last precmd ran (= last command finished)
 
 function _tapeworm_preexec() {{
     _tw_cmd="$1"
     _tw_start=$(date +%s%3N)
+    # Gap = idle + think time since the last command finished
+    if [[ "$_tw_prev_end" -gt 0 ]]; then
+        _tw_gap=$(( _tw_start - _tw_prev_end ))
+    else
+        _tw_gap=0
+    fi
 }}
 
 function _tapeworm_precmd() {{
@@ -31,11 +39,14 @@ function _tapeworm_precmd() {{
             --cwd      "$PWD" \
             --exit     "$_tw_exit" \
             --duration "$_tw_duration" \
+            --gap      "$_tw_gap" \
             --session  "$TAPEWORM_SESSION"{embed_flag} \
             &>/dev/null &!
         _tw_cmd=""
         _tw_start=0
+        _tw_gap=0
     fi
+    _tw_prev_end=$_tw_end
 }}
 
 autoload -Uz add-zsh-hook
@@ -55,6 +66,8 @@ export TAPEWORM_SESSION="$(tapeworm session-id)"
 
 _tw_start=0
 _tw_cmd=""
+_tw_gap=0
+_tw_prev_end=0
 _tw_in_prompt=0
 
 _tapeworm_debug() {{
@@ -62,6 +75,11 @@ _tapeworm_debug() {{
     if [[ "$_tw_in_prompt" == "0" && "$BASH_COMMAND" != "_tapeworm_precmd" ]]; then
         _tw_cmd="$BASH_COMMAND"
         _tw_start=$(date +%s%3N)
+        if [[ "$_tw_prev_end" -gt 0 ]]; then
+            _tw_gap=$(( _tw_start - _tw_prev_end ))
+        else
+            _tw_gap=0
+        fi
     fi
 }}
 
@@ -78,11 +96,14 @@ _tapeworm_precmd() {{
             --cwd      "$PWD" \
             --exit     "$_tw_exit" \
             --duration "$_tw_duration" \
+            --gap      "$_tw_gap" \
             --session  "$TAPEWORM_SESSION"{embed_flag} \
             &>/dev/null &
         _tw_cmd=""
         _tw_start=0
+        _tw_gap=0
     fi
+    _tw_prev_end=$_tw_end
     _tw_in_prompt=0
 }}
 
