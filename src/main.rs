@@ -107,6 +107,22 @@ enum Commands {
         limit: usize,
     },
 
+    /// Show tool transition graph — which tools flow into which, and how often
+    Graph {
+        /// Minimum edge weight to include (filters noise)
+        #[arg(long, default_value_t = 2)]
+        min_weight: i64,
+        /// Output Graphviz DOT format — pipe to: dot -Tpng -o graph.png
+        #[arg(long)]
+        dot: bool,
+        /// Edge type filter: all (default), pipe (| only), seq (&& / || / ;)
+        #[arg(long, default_value = "all")]
+        edge_type: String,
+        /// Max edges to show
+        #[arg(short, long, default_value_t = 60)]
+        limit: usize,
+    },
+
     /// Generate Ollama embeddings for unprocessed commands
     Embed {
         /// Ollama embedding model
@@ -292,6 +308,16 @@ fn main() -> Result<()> {
             let patterns = db::top_pipelines(&conn, limit)?;
             let bigrams = db::top_bigrams(&conn, limit)?;
             display::print_pipes(&patterns, &bigrams);
+        }
+
+        Commands::Graph { min_weight, dot, edge_type, limit } => {
+            let conn = db::open()?;
+            let edges = db::tool_transitions(&conn, &edge_type, min_weight, limit)?;
+            if dot {
+                display::print_dot(&edges);
+            } else {
+                display::print_graph(&edges);
+            }
         }
 
         Commands::Embed { model, url, limit } => {

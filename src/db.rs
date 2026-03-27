@@ -459,6 +459,58 @@ pub fn get_commands_by_ids(conn: &Connection, ids: &[i64]) -> Result<Vec<Command
     rows_to_records(&mut stmt, params_vec.as_slice())
 }
 
+/// One directed edge in the tool transition graph.
+pub struct ToolEdge {
+    pub from:      String,
+    pub to:        String,
+    pub connector: String,  // |  &&  ||  ;  or "" for the last step
+    pub weight:    i64,
+}
+
+/// Returns weighted directed edges between consecutive pipeline tools.
+///
+/// `edge_filter` narrows by connector type:
+///   "pipe" → only `|` edges
+///   "seq"  → `&&`, `||`, `;` edges
+///   "all"  → everything (default)
+///
+/// Edges with weight < `min_weight` are excluded.
+pub fn tool_transitions(
+    conn: &Connection,
+    edge_filter: &str,
+    min_weight: i64,
+    limit: usize,
+) -> Result<Vec<ToolEdge>> {
+    let connector_clause = match edge_filter {
+        "pipe" => "AND a.connector = '|'",
+        "seq"  => "AND a.connector IN ('&&', '||', ';')",
+        _      => "",
+    };
+    let sql = format!(
+        "SELECT a.tool, b.tool, a.connector, COUNT(*) AS weight
+         FROM pipeline_steps a
+         JOIN pipeline_steps b
+             ON b.command_id = a.command_id
+            AND b.step_index = a.step_index + 1
+         WHERE a.tool != '' AND b.tool != ''
+         {connector_clause}
+         GROUP BY a.tool, b.tool, a.connector
+         HAVING weight >= ?1
+         ORDER BY weight DESC
+         LIMIT ?2"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![min_weight, limit as i64], |row| {
+        Ok(ToolEdge {
+            from:      row.get(0)?,
+            to:        row.get(1)?,
+            connector: row.get(2)?,
+            weight:    row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 fn rows_to_records(
     stmt: &mut rusqlite::Statement,
     params: impl rusqlite::Params,

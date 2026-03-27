@@ -1,4 +1,4 @@
-use crate::db::SessionSummary;
+use crate::db::{SessionSummary, ToolEdge};
 use crate::record::CommandRecord;
 use chrono::{Local, TimeZone};
 use colored::Colorize;
@@ -395,4 +395,100 @@ pub fn print_pipes(patterns: &[(String, i64)], bigrams: &[(String, String, i64)]
         }
         println!("{tbl}");
     }
+}
+
+/// Terminal table: ranked directed edges with weight bar chart.
+pub fn print_graph(edges: &[ToolEdge]) {
+    if edges.is_empty() {
+        println!("{}", "No tool transitions recorded yet. Run some pipelines first.".yellow());
+        return;
+    }
+    println!("{}", "=== tool transition graph ===".bold().cyan());
+    let mut tbl = Table::new();
+    tbl.set_header(vec![
+        Cell::new("#").add_attribute(Attribute::Bold),
+        Cell::new("Weight").add_attribute(Attribute::Bold),
+        Cell::new("From").add_attribute(Attribute::Bold),
+        Cell::new("Via").add_attribute(Attribute::Bold),
+        Cell::new("To").add_attribute(Attribute::Bold),
+        Cell::new("").add_attribute(Attribute::Bold),
+    ]);
+    let max = edges.first().map(|e| e.weight).unwrap_or(1);
+    for (i, e) in edges.iter().enumerate() {
+        let bar_len = ((e.weight as f64 / max as f64) * 28.0) as usize;
+        let connector_cell = match e.connector.as_str() {
+            "|"  => Cell::new("|").fg(Color::Green),
+            "&&" => Cell::new("&&").fg(Color::Cyan),
+            "||" => Cell::new("||").fg(Color::Yellow),
+            ";"  => Cell::new(";").fg(Color::DarkGrey),
+            _    => Cell::new(&e.connector),
+        };
+        tbl.add_row(vec![
+            Cell::new((i + 1).to_string()),
+            Cell::new(e.weight.to_string()).fg(Color::Yellow),
+            Cell::new(&e.from).fg(Color::Green),
+            connector_cell,
+            Cell::new(&e.to).fg(Color::Cyan),
+            Cell::new("#".repeat(bar_len)).fg(Color::DarkGrey),
+        ]);
+    }
+    println!("{tbl}");
+    println!(
+        "{}",
+        format!(
+            "  {} edges shown  (| pipe  {} && conditional  {} || fallback  {} ; sequential)",
+            edges.len(),
+            "".to_string(), // spacer — colored labels follow
+            "".to_string(),
+            "".to_string(),
+        )
+        .dimmed()
+    );
+}
+
+/// Graphviz DOT output — pipe to `dot -Tpng -o graph.png` or `dot -Tsvg`.
+///
+/// Edge width scales linearly with weight (0.5–6.0 pt).
+/// Colors by connector: pipe=green, &&=cyan, ||=orange, ;=grey.
+pub fn print_dot(edges: &[ToolEdge]) {
+    if edges.is_empty() {
+        eprintln!("No tool transitions recorded yet.");
+        return;
+    }
+    let max_weight = edges.iter().map(|e| e.weight).max().unwrap_or(1) as f64;
+
+    println!("digraph tapeworm {{");
+    println!("    rankdir=LR;");
+    println!("    bgcolor=\"#1e1e1e\";");
+    println!("    node [shape=box, style=filled, fillcolor=\"#2d2d2d\",");
+    println!("          fontcolor=\"#e0e0e0\", fontname=\"monospace\", fontsize=11];");
+    println!("    edge [fontname=\"monospace\", fontsize=9, fontcolor=\"#aaaaaa\"];");
+    println!();
+
+    // Collect unique node names
+    let mut nodes: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for e in edges {
+        nodes.insert(&e.from);
+        nodes.insert(&e.to);
+    }
+    for node in &nodes {
+        println!("    \"{node}\";");
+    }
+    println!();
+
+    for e in edges {
+        let penwidth = 0.5 + (e.weight as f64 / max_weight) * 5.5;
+        let (color, style) = match e.connector.as_str() {
+            "|"  => ("#44bb66", "solid"),
+            "&&" => ("#4499dd", "solid"),
+            "||" => ("#dd8833", "dashed"),
+            ";"  => ("#888888", "dotted"),
+            _    => ("#aaaaaa", "solid"),
+        };
+        println!(
+            "    \"{}\" -> \"{}\" [label=\"{}\", penwidth={:.2}, color=\"{}\", style=\"{}\"];",
+            e.from, e.to, e.weight, penwidth, color, style
+        );
+    }
+    println!("}}");
 }
