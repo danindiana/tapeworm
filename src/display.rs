@@ -1,3 +1,4 @@
+use crate::archetype::{Archetype, Classification, SessionFeatures};
 use crate::db::{SessionSummary, ToolEdge};
 use crate::record::CommandRecord;
 use crate::taint::{TaintLabel, TaintedPipeline};
@@ -421,6 +422,88 @@ pub fn print_pipes(patterns: &[(String, i64)], bigrams: &[(String, String, i64)]
         }
         println!("{tbl}");
     }
+}
+
+/// Session archetype classification table.
+pub fn print_archetypes(pairs: &[(SessionFeatures, Classification)]) {
+    if pairs.is_empty() {
+        println!("{}", "=== session archetypes ===".bold().cyan());
+        println!("{}", "No sessions recorded yet.".yellow());
+        return;
+    }
+
+    println!("{}", "=== session archetypes ===".bold().cyan());
+    let mut tbl = Table::new();
+    tbl.set_header(vec![
+        Cell::new("Session").add_attribute(Attribute::Bold),
+        Cell::new("Started").add_attribute(Attribute::Bold),
+        Cell::new("Shell").add_attribute(Attribute::Bold),
+        Cell::new("Cmds").add_attribute(Attribute::Bold),
+        Cell::new("Archetype").add_attribute(Attribute::Bold),
+        Cell::new("fail%").add_attribute(Attribute::Bold),
+        Cell::new("gap̄").add_attribute(Attribute::Bold),
+        Cell::new("entropy").add_attribute(Attribute::Bold),
+        Cell::new("flags").add_attribute(Attribute::Bold),
+    ]);
+
+    for (f, c) in pairs {
+        let started = Local.timestamp_opt(f.start_unix, 0)
+            .single()
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| f.start_unix.to_string());
+
+        let archetype_cell = match &c.archetype {
+            Archetype::Unknown     => Cell::new("unknown").fg(Color::DarkGrey),
+            Archetype::Burst       => Cell::new("burst").fg(Color::Cyan),
+            Archetype::Debugging   => Cell::new("debugging").fg(Color::Red),
+            Archetype::Focused     => Cell::new("focused").fg(Color::Green),
+            Archetype::Exploratory => Cell::new("exploratory").fg(Color::Yellow),
+        };
+
+        let fail_pct = format!("{:.0}%", f.failure_rate * 100.0);
+        let fail_cell = if f.failure_rate > 0.35 {
+            Cell::new(fail_pct).fg(Color::Red)
+        } else if f.failure_rate > 0.1 {
+            Cell::new(fail_pct).fg(Color::Yellow)
+        } else {
+            Cell::new(fail_pct).fg(Color::Green)
+        };
+
+        let gap_display = if f.mean_gap_ms > 0.0 {
+            fmt_gap(f.mean_gap_ms as i64)
+        } else {
+            "-".to_string()
+        };
+
+        let entropy_display = if f.tool_entropy > 0.0 {
+            format!("{:.2}", f.tool_entropy)
+        } else {
+            "-".to_string()
+        };
+
+        let flags = if c.interrupted { "⚠ interrupted" } else { "" };
+
+        let sid = &f.session_id;
+        let sid_short = &sid[..8.min(sid.len())];
+
+        tbl.add_row(vec![
+            Cell::new(sid_short),
+            Cell::new(started),
+            Cell::new(&f.shell).fg(Color::DarkGrey),
+            Cell::new(f.cmd_count.to_string()).fg(Color::Yellow),
+            archetype_cell,
+            fail_cell,
+            Cell::new(gap_display).fg(Color::DarkGrey),
+            Cell::new(entropy_display).fg(Color::DarkGrey),
+            Cell::new(flags).fg(Color::Red),
+        ]);
+    }
+    println!("{tbl}");
+    println!(
+        "{}",
+        "  burst=fast gaps  debugging=high fail  focused=low entropy  exploratory=high entropy"
+            .dimmed()
+    );
 }
 
 /// Taint analysis: credential flow through pipelines.

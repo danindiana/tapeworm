@@ -1,3 +1,4 @@
+mod archetype;
 mod config;
 mod db;
 mod display;
@@ -188,6 +189,11 @@ enum SessionCmd {
         #[arg(short, long, default_value_t = 30)]
         limit: usize,
     },
+    /// Classify sessions by behavioral archetype (burst / debugging / focused / exploratory)
+    Archetype {
+        #[arg(short, long, default_value_t = 30)]
+        limit: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -304,6 +310,34 @@ fn main() -> Result<()> {
                 SessionCmd::Failures { limit } => {
                     let chains = db::failure_chains(&conn, limit)?;
                     display::print_failure_chains(&chains);
+                }
+                SessionCmd::Archetype { limit } => {
+                    let raw = db::session_raw_stats(&conn, limit)?;
+                    let sids: Vec<&str> = raw.iter().map(|s| s.session_id.as_str()).collect();
+                    let tool_map = db::session_tool_freqs(&conn, &sids)?;
+
+                    let pairs: Vec<_> = raw.into_iter().map(|s| {
+                        let freqs = tool_map.get(&s.session_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        let entropy = archetype::tool_entropy(&freqs);
+                        let cv = archetype::gap_cv(s.gap_variance, s.mean_gap_ms);
+                        let features = archetype::SessionFeatures {
+                            session_id:   s.session_id,
+                            start_unix:   s.start_unix,
+                            shell:        s.shell,
+                            cmd_count:    s.cmd_count,
+                            failure_rate: s.failure_rate,
+                            mean_gap_ms:  s.mean_gap_ms,
+                            max_gap_ms:   s.max_gap_ms,
+                            gap_cv:       cv,
+                            tool_entropy: entropy,
+                        };
+                        let classification = archetype::classify(&features);
+                        (features, classification)
+                    }).collect();
+
+                    display::print_archetypes(&pairs);
                 }
             }
         }

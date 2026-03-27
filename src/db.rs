@@ -254,6 +254,99 @@ pub fn failure_chains(conn: &Connection, limit: usize) -> Result<Vec<(CommandRec
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+// --- Archetype feature queries ---
+
+/// Raw per-session stats returned from SQL (no tool entropy yet).
+pub struct SessionRawStats {
+    pub session_id:   String,
+    pub start_unix:   i64,
+    pub shell:        String,
+    pub cmd_count:    i64,
+    pub failure_rate: f64,
+    pub mean_gap_ms:  f64,   // 0.0 when all gap_ms are 0
+    pub max_gap_ms:   i64,
+    pub gap_variance: f64,   // E[X²] - E[X]²; 0 when no gap data
+}
+
+/// Fetch per-session summary stats for the N most recent sessions.
+pub fn session_raw_stats(conn: &Connection, limit: usize) -> Result<Vec<SessionRawStats>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+             session_id,
+             MIN(timestamp_unix) AS start_unix,
+             MAX(shell)          AS shell,
+             COUNT(*)            AS cmd_count,
+             CAST(SUM(CASE WHEN exit_code != 0 THEN 1 ELSE 0 END) AS REAL)
+                 / COUNT(*)                                       AS failure_rate,
+             COALESCE(AVG(CASE WHEN gap_ms > 0
+                               THEN CAST(gap_ms AS REAL) END), 0.0) AS mean_gap_ms,
+             MAX(gap_ms)                                          AS max_gap_ms,
+             COALESCE(
+                 AVG(CAST(gap_ms AS REAL) * CAST(gap_ms AS REAL))
+                 - AVG(CAST(gap_ms AS REAL)) * AVG(CAST(gap_ms AS REAL)),
+                 0.0)                                             AS gap_variance
+         FROM commands
+         WHERE session_id != ''
+         GROUP BY session_id
+         ORDER BY start_unix DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok(SessionRawStats {
+            session_id:   row.get(0)?,
+            start_unix:   row.get(1)?,
+            shell:        row.get(2)?,
+            cmd_count:    row.get(3)?,
+            failure_rate: row.get(4)?,
+            mean_gap_ms:  row.get(5)?,
+            max_gap_ms:   row.get(6)?,
+            gap_variance: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Fetch (session_id, tool, frequency) triples for a given set of sessions.
+/// Returns only sessions that have pipeline_steps; others will have no entry.
+pub fn session_tool_freqs(
+    conn: &Connection,
+    session_ids: &[&str],
+) -> Result<std::collections::HashMap<String, std::collections::HashMap<String, i64>>> {
+    if session_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = session_ids.iter().enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT c.session_id, ps.tool, COUNT(*) AS freq
+         FROM commands c
+         JOIN pipeline_steps ps ON ps.command_id = c.id
+         WHERE c.session_id IN ({}) AND ps.tool != ''
+         GROUP BY c.session_id, ps.tool",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params_vec: Vec<&dyn rusqlite::ToSql> = session_ids.iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+    let rows = stmt.query_map(params_vec.as_slice(), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut out: std::collections::HashMap<String, std::collections::HashMap<String, i64>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let (sid, tool, freq) = row?;
+        out.entry(sid).or_default().insert(tool, freq);
+    }
+    Ok(out)
+}
+
 pub fn top_commands(conn: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT command, COUNT(*) as cnt
