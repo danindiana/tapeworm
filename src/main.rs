@@ -77,6 +77,9 @@ enum Commands {
         /// Filter to a specific session ID (or prefix)
         #[arg(long)]
         session: Option<String>,
+        /// Show only commands that exited non-zero
+        #[arg(long)]
+        failures: bool,
     },
 
     /// Search command history by substring pattern
@@ -84,6 +87,12 @@ enum Commands {
         pattern: String,
         #[arg(short, long, default_value_t = 100)]
         limit: usize,
+        /// Restrict to commands since duration ago: 30m, 2h, 1d, 1w
+        #[arg(long)]
+        since: Option<String>,
+        /// Restrict to commands since midnight today
+        #[arg(long)]
+        today: bool,
     },
 
     /// Export all records to stdout
@@ -266,11 +275,11 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Log { limit, since, today, session } => {
+        Commands::Log { limit, since, today, session, failures } => {
             let conn = db::open()?;
             let lim = limit.unwrap_or(cfg.display.log_limit);
 
-            let records = if let Some(sid) = session {
+            let mut records = if let Some(sid) = session {
                 db::recent_in_session(&conn, &sid, lim)?
             } else if today {
                 let since_ts = timefilter::today_start_unix();
@@ -282,12 +291,24 @@ fn main() -> Result<()> {
             } else {
                 db::recent(&conn, lim)?
             };
+            if failures {
+                records.retain(|r| r.exit_code != 0);
+            }
             display::print_log(&records);
         }
 
-        Commands::Search { pattern, limit } => {
+        Commands::Search { pattern, limit, since, today } => {
             let conn = db::open()?;
-            let records = db::search(&conn, &pattern, limit)?;
+            let records = if today {
+                let since_ts = timefilter::today_start_unix();
+                db::search_since(&conn, &pattern, since_ts, limit)?
+            } else if let Some(dur) = since {
+                let since_ts = timefilter::since_unix(&dur)
+                    .context("parsing --since duration")?;
+                db::search_since(&conn, &pattern, since_ts, limit)?
+            } else {
+                db::search(&conn, &pattern, limit)?
+            };
             display::print_log(&records);
         }
 

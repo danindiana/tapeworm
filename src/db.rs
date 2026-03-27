@@ -200,6 +200,20 @@ pub fn search(conn: &Connection, pattern: &str, limit: usize) -> Result<Vec<Comm
     rows_to_records(&mut stmt, params![like, limit as i64])
 }
 
+pub fn search_since(conn: &Connection, pattern: &str, since_unix: i64, limit: usize) -> Result<Vec<CommandRecord>> {
+    let like = format!("%{}%", pattern);
+    let mut stmt = conn.prepare(
+        "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
+                exit_code, duration_ms, gap_ms, shell, user, hostname, session_id
+         FROM commands
+         WHERE command LIKE ?1
+           AND timestamp_unix >= ?2
+         ORDER BY timestamp_unix DESC
+         LIMIT ?3",
+    )?;
+    rows_to_records(&mut stmt, params![like, since_unix, limit as i64])
+}
+
 pub fn all(conn: &Connection) -> Result<Vec<CommandRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, timestamp_unix, timestamp_iso, command, cwd,
@@ -459,7 +473,7 @@ pub fn top_commands(conn: &Connection, limit: usize) -> Result<Vec<(String, i64)
 
 pub fn hourly_distribution(conn: &Connection) -> Result<Vec<(i64, i64)>> {
     let mut stmt = conn.prepare(
-        "SELECT CAST(strftime('%H', datetime(timestamp_unix, 'unixepoch')) AS INTEGER) as hr,
+        "SELECT CAST(strftime('%H', datetime(timestamp_unix, 'unixepoch', 'localtime')) AS INTEGER) as hr,
                 COUNT(*) as cnt
          FROM commands
          GROUP BY hr

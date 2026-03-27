@@ -96,7 +96,7 @@ pub fn print_stats(
     println!("{tbl}");
     println!();
 
-    println!("{}", "Activity by hour (UTC):".bold());
+    println!("{}", "Activity by hour (local):".bold());
 
     let max_count = hourly.iter().map(|(_, c)| *c).max().unwrap_or(1);
     for h in 0i64..24 {
@@ -852,15 +852,12 @@ pub fn print_graph(edges: &[ToolEdge]) {
     }
     println!("{tbl}");
     println!(
-        "{}",
-        format!(
-            "  {} edges shown  (| pipe  {} && conditional  {} || fallback  {} ; sequential)",
-            edges.len(),
-            "".to_string(), // spacer — colored labels follow
-            "".to_string(),
-            "".to_string(),
-        )
-        .dimmed()
+        "  {}  ({} pipe  {} cond  {} fallback  {} seq)",
+        format!("{} edges shown", edges.len()).dimmed(),
+        "|".green(),
+        "&&".cyan(),
+        "||".yellow(),
+        ";".dimmed()
     );
 }
 

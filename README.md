@@ -89,8 +89,8 @@ Start a new shell session. Recording begins immediately.
 | `init [--shell zsh\|bash] [--auto-embed]` | Print shell hook snippet for eval |
 | `session-id` | Generate a new session UUID (used internally) |
 | `record --cmd CMD --cwd DIR --exit N --duration N --gap N --session S [--embed]` | Write one record (called by hooks) |
-| `log [-l N] [--since DURATION] [--today] [--session ID]` | Recent command history |
-| `search PATTERN [-l N]` | Substring search |
+| `log [-l N] [--since DURATION] [--today] [--session ID] [--failures]` | Recent command history |
+| `search PATTERN [-l N] [--since DURATION] [--today]` | Substring search |
 | `export [--format json\|csv]` | Dump all records to stdout |
 | `stats` | Top commands + hourly activity chart |
 | `tools [-l N]` | Top tools by pipeline-step frequency |
@@ -115,6 +115,14 @@ tapeworm log -l 100
 
 # Commands from the last 2 hours
 tapeworm log --since 2h
+
+# Only failed commands
+tapeworm log --failures
+tapeworm log --failures --since 1d
+
+# Search within a time window
+tapeworm search git --since 2h
+tapeworm search "cargo build" --today
 
 # Show a session's timeline (with gap timing)
 tapeworm session list
