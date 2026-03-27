@@ -201,7 +201,9 @@ pub fn list_sessions(conn: &Connection, limit: usize) -> Result<Vec<SessionSumma
 /// Commands that ran immediately after a non-zero exit within the same session.
 /// Returns (failed_cmd, recovery_cmd) pairs ordered by failure time descending.
 pub fn failure_chains(conn: &Connection, limit: usize) -> Result<Vec<(CommandRecord, CommandRecord)>> {
-    // Find the command with the next-higher id in the same session after a failure.
+    // Find the next command (by time, then id as tiebreaker) in the same session after a failure.
+    // Using (timestamp_unix, id) order rather than bare id because the hook records asynchronously
+    // (&! / &), so insertion order can diverge from issue order within the same second.
     let mut stmt = conn.prepare(
         "SELECT
              f.id, f.timestamp_unix, f.timestamp_iso, f.command, f.cwd,
@@ -212,8 +214,12 @@ pub fn failure_chains(conn: &Connection, limit: usize) -> Result<Vec<(CommandRec
          JOIN commands r
            ON r.session_id = f.session_id
           AND r.id = (
-              SELECT MIN(id) FROM commands
-              WHERE session_id = f.session_id AND id > f.id
+              SELECT id FROM commands
+              WHERE session_id = f.session_id
+                AND (timestamp_unix > f.timestamp_unix
+                     OR (timestamp_unix = f.timestamp_unix AND id > f.id))
+              ORDER BY timestamp_unix ASC, id ASC
+              LIMIT 1
           )
          WHERE f.exit_code != 0
            AND f.session_id != ''
@@ -491,13 +497,20 @@ pub fn top_bigrams(conn: &Connection, limit: usize) -> Result<Vec<(String, Strin
 /// Only multi-step pipelines are included. Uses ordered subquery for deterministic
 /// GROUP_CONCAT results.
 pub fn top_pipelines(conn: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
+    // Each step contributes "tool connector" (e.g. "grep |") or just "tool" for the last step,
+    // so GROUP_CONCAT(..., ' ') produces the accurate pattern "grep | awk && sed" rather than
+    // collapsing all connectors to ' | '.
     let mut stmt = conn.prepare(
         "SELECT pattern, COUNT(*) as cnt
          FROM (
              SELECT command_id,
-                    GROUP_CONCAT(tool, ' | ') as pattern
+                    GROUP_CONCAT(step_str, ' ') as pattern
              FROM (
-                 SELECT command_id, tool
+                 SELECT command_id, step_index,
+                        CASE WHEN connector != ''
+                             THEN tool || ' ' || connector
+                             ELSE tool
+                        END as step_str
                  FROM pipeline_steps
                  WHERE tool != ''
                  ORDER BY command_id, step_index

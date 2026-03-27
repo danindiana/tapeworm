@@ -100,7 +100,7 @@ Start a new shell session. Recording begins immediately.
 | `session list [-l N]` | Recent sessions with summary stats |
 | `session show SESSION_ID` | Full timeline for one session (with gap column) |
 | `session failures [-l N]` | Failure chains: failed command → next command pairs |
-| `session archetype [-l N]` | Classify sessions by behavioral archetype |
+| `session archetype [-l N] [--explain SESSION_ID]` | Classify sessions by behavioral archetype; `--explain` shows decision path for one session |
 | `embed [--model MODEL] [--url URL] [-l N]` | Generate Ollama embeddings |
 | `semantic QUERY [-l N] [--model MODEL] [--url URL]` | Natural language similarity search |
 | `config` | Show config path and values |
@@ -134,6 +134,9 @@ tapeworm taint --all      # also show clean steps
 
 # How did my sessions behave?
 tapeworm session archetype
+
+# Why was session abc12345 classified as Debugging?
+tapeworm session archetype --explain abc12345
 
 # Natural language history search
 tapeworm semantic "debug memory leak"
@@ -300,6 +303,32 @@ Sessions are also flagged `⚠ interrupted` when any single gap exceeds 5 minute
 ```bash
 tapeworm session archetype
 tapeworm session archetype -l 50
+
+# Show which features drove a specific session's classification
+tapeworm session archetype --explain a3f8c2d1
+```
+
+When ≥ 5 sessions are present the table also computes a population baseline (mean ± σ) for each feature. Sessions more than 2σ from the mean receive deviation indicators in the flags column: `↑fail` (high failure rate), `↓gap` (unusually fast), `↑ent` (high entropy), and so on. A legend line notes when baseline is active.
+
+The `--explain` view shows each classification gate with its feature value, the threshold, and whether that gate fired:
+
+```
+=== archetype explain: a3f8c2d1
+
+Features:
+  cmd_count        20
+  failure_rate     5.0%
+  mean_gap         -  (max: 0ms)
+  tool_entropy     0.868
+
+Decision path:
+  ✓ cmd_count ≥ 3?           20 ≥ 3  →  continue
+  ✗ failure_rate > 35%?       5.0% > 35%  →  skip
+  ✗ gap < 2s AND cmds ≥ 5?   no gap data ✗  AND  20 ≥ 5 ✓  →  skip
+  ✗ entropy > 0 AND < 0.45?  0.868 < 0.45  →  skip
+  ✓ entropy ≥ 0.45?           0.868 ≥ 0.45  →  EXPLORATORY  ◀
+
+  Classification: EXPLORATORY
 ```
 
 ---
@@ -312,6 +341,18 @@ The shell hook records `gap_ms` — time elapsed from when the previous command 
 - **Dim** (< 60 s): normal flow
 - **Yellow** (60–300 s): long pause — reading docs or thinking
 - **Red** (> 300 s): interrupted session — stepped away
+
+`tapeworm session show` also appends a gap distribution histogram when any gap data is present — six buckets from `<1s` to `>5m` with a bar scaled to the largest bucket:
+
+```
+  gap distribution:
+     <1s    0
+    1-5s    3  ▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪
+   5-30s    1  ▪▪▪▪▪▪▪▪
+  30-60s    0
+    1-5m    1  ▪▪▪▪▪▪▪▪
+     >5m    0
+```
 
 Gap data accumulates starting from the first shell opened after installing the updated hook. Pre-existing records show `0`.
 
