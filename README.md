@@ -1,4 +1,29 @@
-# tapeworm
+![gemini-svg (3)](https://github.com/user-attachments/assets/f56a6a11-b529-41c8-b95f-0223bb2af47c)# tapeworm
+![Uploadin<svg viewBox="0 0 500 500" xmlns="http://www.w3.org/2000/svg">
+  <rect width="30%" height="30%" fill="#090212" />
+  
+  <g stroke="#ff007f" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M 100,150 L 250,150 L 250,250 L 150,250 L 150,350 L 250,350 L 250,300 L 350,300 L 350,350 L 400,350" />
+  </g>
+  
+  <path d="M 150,250 L 150,350 L 250,350 L 250,300" stroke="#00ffff" stroke-width="8" stroke-dasharray="12,12" fill="none"/>
+  
+  <g fill="#090212" stroke="#00ffff" stroke-width="6">
+    <circle cx="100" cy="150" r="14" />
+    <circle cx="250" cy="150" r="14" />
+    <circle cx="250" cy="250" r="14" />
+    <circle cx="150" cy="250" r="14" />
+    <circle cx="150" cy="350" r="14" />
+    <circle cx="250" cy="350" r="14" />
+    <circle cx="250" cy="300" r="14" />
+    <circle cx="350" cy="300" r="14" />
+    <circle cx="350" cy="350" r="14" />
+    <circle cx="400" cy="350" r="14" />
+  </g>
+  
+  <text x="290" y="440" font-family="sans-serif" font-weight="900" font-style="italic" font-size="24" fill="#ff007f" letter-spacing="4">TAPEWORM</text>
+</svg>
+g gemini-svg (3).svg…]()
 
 **Terminal Activity & Process Execution Workflow Observer/Recorder**
 
