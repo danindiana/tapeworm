@@ -360,6 +360,33 @@ GROUP BY b.tool ORDER BY cnt DESC;
 
 ---
 
+## Security
+
+### Command redaction
+
+tapeworm scrubs credential-like values from commands before storing them. Patterns covered:
+
+- Flag-space-value: `mysql -p s3cr3t` → `mysql -p <REDACTED>`
+- Flag=value: `curl --token=abc123` → `curl --token=<REDACTED>`
+- Env-var assignments: `API_KEY=xyz ./deploy.sh` → `API_KEY=<REDACTED> ./deploy.sh`
+
+Covered flags: `--password`, `-p`, `--token`, `--secret`, `--secret-access-key`, `--api-key`, `--auth`, `--bearer`, `--private-key`, `--access-key`, `--client-secret` and common variants.
+
+**Known limitation:** `-p` is overloaded — `ssh -p 22` and `mysql -p password` both match. tapeworm errs on the side of redacting.
+
+**Shell-side mitigation** (for commands not covered): prefix with a space in zsh/bash with `HISTIGNORE=" *"` set, or use `read -rs TOKEN` to avoid secrets appearing on the command line at all.
+
+### MCP read-only enforcement
+
+The `tapeworm-history` MCP server (`scripts/tapeworm_mcp.py`) enforces two layers of read-only access:
+
+1. **SQLite URI mode**: connection opened as `file:...?mode=ro` — the OS-level SQLite flag that physically prevents any write operation, even if the query bypasses application-level checks.
+2. **Query validator**: rejects any statement that doesn't begin with `SELECT` or `WITH`, and blocks keywords `INSERT`, `UPDATE`, `DELETE`, `DROP`, `CREATE`, `ALTER`, `ATTACH`, `PRAGMA`, `VACUUM`.
+
+This means Claude Code cannot delete, modify, or corrupt your history through the MCP interface.
+
+---
+
 ## MCP integration (Claude Code)
 
 tapeworm ships with configuration for two Claude Code MCP servers, giving Claude direct tool access to Ollama and the tapeworm history database.
@@ -375,28 +402,28 @@ claude mcp add ollama-rawveg \
   --env "OLLAMA_HOST=http://localhost:11434" \
   -- npx -y ollama-mcp
 
-# SQLite MCP — full read/write SQL access to the tapeworm history DB
-pip install mcp-server-sqlite
-claude mcp add sqlite-tapeworm \
-  --transport stdio \
-  -- /path/to/venv/bin/mcp-server-sqlite \
-  --db-path ~/.local/share/tapeworm/history.db
+# Read-only tapeworm history MCP (SELECT-only, SQLite URI read-only mode)
+pip install mcp  # if not already installed
+claude mcp add tapeworm-history --transport stdio -- python scripts/tapeworm_mcp.py
 ```
 
 Verify both connect:
 ```bash
 claude mcp list
-# ollama-rawveg:   npx -y ollama-mcp                    ✓ Connected
-# sqlite-tapeworm: mcp-server-sqlite --db-path ...       ✓ Connected
+# ollama-rawveg:     npx -y ollama-mcp          ✓ Connected
+# tapeworm-history:  python scripts/tapeworm_mcp.py   ✓ Connected
 ```
 
 ### What this enables
 
 With these MCPs active, Claude Code can:
 - Query the tapeworm DB directly in natural language ("what commands failed today?")
+- Use `recent_commands`, `failed_commands`, `query`, `list_tables`, `describe_table` tools
 - Generate embeddings for semantic search without leaving Claude Code
 - Pull or inspect Ollama models inline during a session
 - Cross-reference your shell history with code you're actively editing
+
+The history MCP is read-only at both the application and SQLite driver level — no mutations are possible through it. See [Security](#security) above.
 
 ---
 

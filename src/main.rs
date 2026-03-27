@@ -4,6 +4,7 @@ mod display;
 mod embed;
 mod parse;
 mod record;
+mod redact;
 mod semantic;
 mod shell;
 mod timefilter;
@@ -196,6 +197,7 @@ fn main() -> Result<()> {
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_default();
 
+            let cmd = redact::redact_command(&cmd);
             let r = CommandRecord::new(
                 cmd, cwd, exit, duration, shell_name, user, hostname, session,
             );
